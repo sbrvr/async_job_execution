@@ -9,6 +9,7 @@ A source table counts as refreshed at the later of:
          b) the pipeline's event log, event_log(<pipeline_id>) — latest COMPLETED flow writing the table
          c) Pipelines API — latest COMPLETED update that covered the table (whole pipeline or selected)
        JOB producer (table written by a job, from the tracker's src_table_producers): last successful job run.
+Tables passed as `refreshed_now` (just processed by the upstream job calling the check) count as refreshed now.
 Tables with no known producer use the last data write only.
 
 All timestamps are naive UTC.
@@ -186,8 +187,12 @@ class FreshnessChecker:
         return None
 
     # ---- check -------------------------------------------------------------------------------------------------
-    def check(self, tables, refresh_window_mins: int, now: datetime, producers: dict = None):
-        """Return (cutoff, [SourceStatus]) for `tables` against the window ending at `now`."""
+    def check(self, tables, refresh_window_mins: int, now: datetime, producers: dict = None, refreshed_now=()):
+        """Return (cutoff, [SourceStatus]) for `tables` against the window ending at `now`.
+
+        `refreshed_now`: tables the calling upstream job has just processed (its earlier tasks completed), counted as
+        refreshed at `now` even if no rows changed and the job's run has not finished yet.
+        """
         now = _naive_utc(now)
         cutoff = now - timedelta(minutes=refresh_window_mins)
         statuses = []
@@ -195,7 +200,9 @@ class FreshnessChecker:
             last_write, error = self.last_write(t)
             producer_type, producer_id = self.resolve_producer(t, producers)
             success, signal = None, None
-            if producer_type == "PIPELINE":
+            if t in refreshed_now:
+                success, signal = now, "refreshed by calling upstream job"
+            elif producer_type == "PIPELINE":
                 success, signal = self.pipeline_last_success(t, producer_id)
             elif producer_type == "JOB":
                 success, signal = self.job_last_success(producer_id)

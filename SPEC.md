@@ -2,8 +2,14 @@
 
 ## Goal
 Run a downstream Job / Pipeline only when **all** of its upstream source tables have been refreshed within a
-configurable time window — either launched asynchronously as soon as that is true, or checked by a scheduled job
-before it runs.
+configurable time window — launched asynchronously by the last task of the upstream job that refreshes them, or
+checked by a gating task before the downstream job runs.
+
+**Scope: SDP jobs.** The framework targets upstream jobs whose work is done by Lakeflow Spark Declarative Pipeline
+(SDP) tasks. `job_pipeline_launch.py` runs as the job's last task, after every pipeline task has **finished**, so the
+tables those pipelines refresh are complete when downstream entities are checked and launched — including pipeline
+updates that changed no rows. Discovery also relies on SDP metadata (pipeline-managed tables, flow progress);
+non-pipeline tasks are not tracked.
 
 ## Why not table update triggers
 Jobs table update triggers only offer **Any table updated** or **All tables updated**:
@@ -26,8 +32,8 @@ Jobs table update triggers only offer **Any table updated** or **All tables upda
 |---|---|
 | `tracker_setup.py` | Creates the tracker table. |
 | `upstream_source_tracking.py` | For a Job / Pipeline name: finds its pipelines (job → `pipeline_task`s; other task types skipped), the tables they currently manage (lineage targets confirmed by UC `pipeline_id`), the **final** tables (not read by another owned table) and the **external sources** (inputs of each owned table's latest write, minus owned tables, UC views expanded via `view_dependencies`). Records each source's producer. MERGEs one tracker row. |
-| `source_freshness_check.py` | Fails unless every source (minus skip list) of one entity is fresh — use as the first task of a job. |
-| `job_pipeline_launch.py` | Scheduled sweep over all entities: freshness → exact name resolution → skip if running or already started after the newest source refresh (launch once per refresh) → `run_now` / `start_update`. |
+| `source_freshness_check.py` | Optional gating task: fails unless every source (minus skip list) of one entity is fresh — first task of a scheduled downstream job. |
+| `job_pipeline_launch.py` | **Last task of an upstream job**, `--src_tables` = the tables its pipelines just refreshed. Finds tracked entities that use any of them (and don't skip them); those tables count as refreshed now, other sources go through the freshness rule; then exact name resolution → skip if running or already started after the newest source refresh → `run_now` / `start_update`. |
 | `async_job_execution/freshness.py` | Freshness rule shared by the check and the launcher. |
 
 ## Tracker table (`surajb.common.entity_tracker`)
@@ -54,10 +60,13 @@ A source is **refreshed** at the later of:
    - `JOB` — end of the producing job's last successful run;
    - `NONE` — last data write only.
 
-A source is fresh if `refreshed_at >= now − refresh_window_btn_tables_in_mins`.
+Tables passed to `job_pipeline_launch.py --src_tables` count as refreshed at launch time (the calling job's pipeline
+tasks have just finished). A source is fresh if `refreshed_at >= now − refresh_window_btn_tables_in_mins`.
 
 ## Known gaps
-- Only pipeline tasks of a job are tracked; tables written by notebook / other tasks are not discovered.
+- Only pipeline tasks of a job are tracked; tables written by notebook / other tasks are not discovered (by design —
+  see Scope).
+- `--src_tables` is passed by the upstream job and must match the tracker's fully qualified names.
 - Tables written through pipeline **sinks** have no UC `pipeline_id` and are not tracked as targets.
 - A JOB producer's success is job-level and found from lineage (best effort with several writers).
 - Discovery depends on lineage: a new pipeline / table appears only after its first run's lineage lands.

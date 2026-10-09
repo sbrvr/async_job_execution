@@ -1,6 +1,10 @@
-"""Sweep every tracked Job / Pipeline and launch each one whose upstream sources are all fresh.
+"""Launch the downstream Jobs / Pipelines of tables an upstream job has just refreshed, once all their sources are fresh.
 
-Run on a schedule. For each tracker row (optionally filtered by --entity_type):
+Run as the LAST task of an upstream job (depends on all its other tasks), with --src_tables = the tables that job
+refreshes (one or more, comma-separated):
+  0. Candidates: tracked entities whose src_tables include any of them (and not in src_tables_to_skip). The given
+     tables count as refreshed now — the job's earlier tasks just processed them, even if no rows changed.
+For each candidate (optionally filtered by --entity_type):
   1. Freshness: every src table not in src_tables_to_skip refreshed within refresh_window_btn_tables_in_mins.
   2. Resolve entity_name to exactly one Job / Pipeline.
   3. Skip if it is running now or already started after the newest source refresh (launch once per refresh).
@@ -20,7 +24,9 @@ ACTIVE_PIPELINE_STATES = {"RUNNING", "STARTING", "DEPLOYING", "RESETTING"}
 
 
 def parse_args():
-    parser = base_parser("Launch Jobs / Pipelines whose upstream sources are fresh")
+    parser = base_parser("Launch downstream Jobs / Pipelines whose upstream sources are fresh")
+    parser.add_argument("--src_tables", required=True,
+                        help="Comma-separated fully qualified tables the calling upstream job has just refreshed")
     parser.add_argument("--entity_type", default="ALL", choices=("ALL",) + ENTITY_TYPES)
     parser.add_argument("--dry_run", default="true", help="true = check and log only, launch nothing")
     return parser.parse_args()
@@ -62,19 +68,27 @@ def main():
     args = parse_args()
     dry_run = str_to_bool(args.dry_run)
     spark, w = get_spark(), get_workspace_client()
+    refreshed = sorted({t.strip() for t in args.src_tables.replace(" ", ",").split(",") if t.strip()})
+    if not refreshed:
+        raise ValueError("--src_tables needs at least one table.")
     checker = FreshnessChecker(spark, w)  # caches lookups: a source shared by several entities is checked once
-    print(f"Tracker: {args.tracker_table} | entity_type: {args.entity_type} | dry_run: {dry_run}")
+    print(f"Tracker: {args.tracker_table} | refreshed src_tables: {refreshed} | "
+          f"entity_type: {args.entity_type} | dry_run: {dry_run}")
 
     entities = spark.sql(
         """
         SELECT entity_name, entity_type, src_tables, src_tables_to_skip, src_table_producers,
                refresh_window_btn_tables_in_mins
         FROM IDENTIFIER(:tracker_table)
-        WHERE :entity_type = 'ALL' OR entity_type = :entity_type
+        WHERE (:entity_type = 'ALL' OR entity_type = :entity_type)
+          -- downstream of the refreshed tables: uses one of them and does not skip it
+          AND exists(src_tables, t -> array_contains(:refreshed, t)
+                                     AND NOT array_contains(coalesce(src_tables_to_skip, array()), t))
         ORDER BY entity_type, entity_name
         """,
-        args={"tracker_table": args.tracker_table, "entity_type": args.entity_type},
+        args={"tracker_table": args.tracker_table, "entity_type": args.entity_type, "refreshed": refreshed},
     ).collect()
+    print(f"Downstream entities: {[e['entity_name'] for e in entities] or 'none'}")
     now = spark.sql("SELECT current_timestamp() AS ts").collect()[0]["ts"]
     results = []  # (entity_type, entity_name, status, detail)
 
@@ -92,7 +106,7 @@ def main():
             continue
 
         producers = {k: v.asDict() for k, v in (e["src_table_producers"] or {}).items()}
-        cutoff, statuses = checker.check(tables, window, now, producers)
+        cutoff, statuses = checker.check(tables, window, now, producers, refreshed_now=set(refreshed))
         for s in statuses:
             print(f"  {'FRESH' if s.is_fresh else 'STALE'}  {s.table}  refreshed_at={s.refreshed_at} "
                   f"[{s.producer_signal or 'last write'}] cutoff={cutoff}")
