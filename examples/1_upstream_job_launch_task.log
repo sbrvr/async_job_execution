@@ -1,14 +1,14 @@
-Tracker: surajb.ajx_test.entity_tracker | refreshed src_tables: ['surajb.ajx_test.bronze_orders', 'surajb.ajx_test.bronze_products', 'surajb.ajx_test.bronze_regions', 'surajb.ajx_test.customers_scd2'] | entity_type: ALL | dry_run: False
-Selected 3 tracker row(s) downstream of ['surajb.ajx_test.bronze_orders', 'surajb.ajx_test.bronze_products', 'surajb.ajx_test.bronze_regions', 'surajb.ajx_test.customers_scd2']: [('ajx test - J_gold', 'weekly'), ('ajx test - J_silver', 'default'), ('ajx test - P5 customer snapshot', 'default')]
+Tracker: my_catalog.demo.entity_tracker | refreshed src_tables: ['my_catalog.demo.bronze_orders', 'my_catalog.demo.bronze_products', 'my_catalog.demo.bronze_regions', 'my_catalog.demo.customers_scd2'] | entity_type: ALL | dry_run: False
+Selected 3 tracker row(s) downstream of ['my_catalog.demo.bronze_orders', 'my_catalog.demo.bronze_products', 'my_catalog.demo.bronze_regions', 'my_catalog.demo.customers_scd2']: [('ajx test - J_gold', 'weekly'), ('ajx test - J_silver', 'default'), ('ajx test - P5 customer snapshot', 'default')]
 
 === Tracker row: JOB 'ajx test - J_gold' [src_group weekly]
     entity_name                        ajx test - J_gold
     entity_type                        JOB
     src_group                          weekly
-    target_tables                      ['surajb.ajx_test.gold_product_sales', 'surajb.ajx_test.gold_regional_sales']
-    src_tables                         ['surajb.ajx_test.bronze_products', 'surajb.ajx_test.bronze_regions']
+    target_tables                      ['my_catalog.demo.gold_product_sales', 'my_catalog.demo.gold_regional_sales']
+    src_tables                         ['my_catalog.demo.bronze_products', 'my_catalog.demo.bronze_regions']
     src_tables_to_skip                 []
-    src_table_producers                {'surajb.ajx_test.bronze_products': {'producer_type': 'PIPELINE', 'producer_id': '78efacec-4a82-435e-93ba-ead711648bf9'}, 'surajb.ajx_test.bronze_regions': {'producer_type': 'PIPELINE', 'producer_id': '78efacec-4a82-435e-93ba-ead711648bf9'}}
+    src_table_producers                {'my_catalog.demo.bronze_products': {'producer_type': 'PIPELINE', 'producer_id': '78efacec-4a82-435e-93ba-ead711648bf9'}, 'my_catalog.demo.bronze_regions': {'producer_type': 'PIPELINE', 'producer_id': '78efacec-4a82-435e-93ba-ead711648bf9'}}
     refresh_window_btn_tables_in_mins  10080
     created_on                         2026-10-09
     updated_on                         2026-10-09
@@ -16,10 +16,10 @@ Selected 3 tracker row(s) downstream of ['surajb.ajx_test.bronze_orders', 'suraj
     updated_by                         user@example.com
     -> skipped src_tables (0): none
     -> checking 2 src_table(s) against refresh_window_btn_tables_in_mins=10080:
-       MET (producer refresh) surajb.ajx_test.bronze_products: refreshed 0.0 min ago (window 10080 min, cutoff 2026-10-02 20:48:27.853154)
+       MET (producer refresh) my_catalog.demo.bronze_products: refreshed 0.0 min ago (window 10080 min, cutoff 2026-10-02 20:48:27.853154)
           last write: materialized view — no Delta history; refresh and rows from its producer pipeline
           producer: PIPELINE 78efacec-4a82-435e-93ba-ead711648bf9 refreshed it at 2026-10-09 20:48:27.853154 [refreshed by calling upstream job]
-       MET (producer refresh) surajb.ajx_test.bronze_regions: refreshed 0.0 min ago (window 10080 min, cutoff 2026-10-02 20:48:27.853154)
+       MET (producer refresh) my_catalog.demo.bronze_regions: refreshed 0.0 min ago (window 10080 min, cutoff 2026-10-02 20:48:27.853154)
           last write: materialized view — no Delta history; refresh and rows from its producer pipeline
           producer: PIPELINE 78efacec-4a82-435e-93ba-ead711648bf9 refreshed it at 2026-10-09 20:48:27.853154 [refreshed by calling upstream job]
 
@@ -27,10 +27,10 @@ Selected 3 tracker row(s) downstream of ['surajb.ajx_test.bronze_orders', 'suraj
     entity_name                        ajx test - J_silver
     entity_type                        JOB
     src_group                          default
-    target_tables                      ['surajb.ajx_test.silver_customer_orders', 'surajb.ajx_test.silver_sales']
-    src_tables                         ['surajb.ajx_test.bronze_orders', 'surajb.ajx_test.bronze_products', 'surajb.ajx_test.customers_scd2']
+    target_tables                      ['my_catalog.demo.silver_customer_orders', 'my_catalog.demo.silver_sales']
+    src_tables                         ['my_catalog.demo.bronze_orders', 'my_catalog.demo.bronze_products', 'my_catalog.demo.customers_scd2']
     src_tables_to_skip                 []
-    src_table_producers                {'surajb.ajx_test.bronze_orders': {'producer_type': 'PIPELINE', 'producer_id': 'ea04d2a3-2756-46c9-afe6-f0261d969f99'}, 'surajb.ajx_test.bronze_products': {'producer_type': 'PIPELINE', 'producer_id': '78efacec-4a82-435e-93ba-ead711648bf9'}, 'surajb.ajx_test.customers_scd2': {'producer_type': 'PIPELINE', 'producer_id': 'ea04d2a3-2756-46c9-afe6-f0261d969f99'}}
+    src_table_producers                {'my_catalog.demo.bronze_orders': {'producer_type': 'PIPELINE', 'producer_id': 'ea04d2a3-2756-46c9-afe6-f0261d969f99'}, 'my_catalog.demo.bronze_products': {'producer_type': 'PIPELINE', 'producer_id': '78efacec-4a82-435e-93ba-ead711648bf9'}, 'my_catalog.demo.customers_scd2': {'producer_type': 'PIPELINE', 'producer_id': 'ea04d2a3-2756-46c9-afe6-f0261d969f99'}}
     refresh_window_btn_tables_in_mins  20
     created_on                         2026-10-09
     updated_on                         2026-10-09
@@ -38,13 +38,13 @@ Selected 3 tracker row(s) downstream of ['surajb.ajx_test.bronze_orders', 'suraj
     updated_by                         user@example.com
     -> skipped src_tables (0): none
     -> checking 3 src_table(s) against refresh_window_btn_tables_in_mins=20:
-       MET (refreshed by calling upstream job, no rows changed in window) surajb.ajx_test.bronze_orders: refreshed 0.0 min ago (window 20 min, cutoff 2026-10-09 20:28:27.853154)
+       MET (refreshed by calling upstream job, no rows changed in window) my_catalog.demo.bronze_orders: refreshed 0.0 min ago (window 20 min, cutoff 2026-10-09 20:28:27.853154)
           last write: STREAMING UPDATE at 2026-10-09 19:55:15 (numOutputRows=2)
           producer: PIPELINE ea04d2a3-2756-46c9-afe6-f0261d969f99 ran successfully at 2026-10-09 20:48:27.853154 [refreshed by calling upstream job] — no write within the window (run changed no rows)
-       MET (producer refresh) surajb.ajx_test.bronze_products: refreshed 0.0 min ago (window 20 min, cutoff 2026-10-09 20:28:27.853154)
+       MET (producer refresh) my_catalog.demo.bronze_products: refreshed 0.0 min ago (window 20 min, cutoff 2026-10-09 20:28:27.853154)
           last write: materialized view — no Delta history; refresh and rows from its producer pipeline
           producer: PIPELINE 78efacec-4a82-435e-93ba-ead711648bf9 refreshed it at 2026-10-09 20:48:27.853154 [refreshed by calling upstream job]
-       MET (refreshed by calling upstream job, no rows changed in window) surajb.ajx_test.customers_scd2: refreshed 0.0 min ago (window 20 min, cutoff 2026-10-09 20:28:27.853154)
+       MET (refreshed by calling upstream job, no rows changed in window) my_catalog.demo.customers_scd2: refreshed 0.0 min ago (window 20 min, cutoff 2026-10-09 20:28:27.853154)
           last write: MERGE at 2026-10-09 19:55:26 (numOutputRows=2, numTargetRowsInserted=1, numTargetRowsUpdated=1)
           producer: PIPELINE ea04d2a3-2756-46c9-afe6-f0261d969f99 ran successfully at 2026-10-09 20:48:27.853154 [refreshed by calling upstream job] — no write within the window (run changed no rows)
 
@@ -52,10 +52,10 @@ Selected 3 tracker row(s) downstream of ['surajb.ajx_test.bronze_orders', 'suraj
     entity_name                        ajx test - P5 customer snapshot
     entity_type                        PIPELINE
     src_group                          default
-    target_tables                      ['surajb.ajx_test.customer_snapshot']
-    src_tables                         ['surajb.ajx_test.customers_scd2']
+    target_tables                      ['my_catalog.demo.customer_snapshot']
+    src_tables                         ['my_catalog.demo.customers_scd2']
     src_tables_to_skip                 []
-    src_table_producers                {'surajb.ajx_test.customers_scd2': {'producer_type': 'PIPELINE', 'producer_id': 'ea04d2a3-2756-46c9-afe6-f0261d969f99'}}
+    src_table_producers                {'my_catalog.demo.customers_scd2': {'producer_type': 'PIPELINE', 'producer_id': 'ea04d2a3-2756-46c9-afe6-f0261d969f99'}}
     refresh_window_btn_tables_in_mins  20
     created_on                         2026-10-09
     updated_on                         2026-10-09
@@ -63,11 +63,11 @@ Selected 3 tracker row(s) downstream of ['surajb.ajx_test.bronze_orders', 'suraj
     updated_by                         user@example.com
     -> skipped src_tables (0): none
     -> checking 1 src_table(s) against refresh_window_btn_tables_in_mins=20:
-       MET (refreshed by calling upstream job, no rows changed in window) surajb.ajx_test.customers_scd2: refreshed 0.0 min ago (window 20 min, cutoff 2026-10-09 20:28:27.853154)
+       MET (refreshed by calling upstream job, no rows changed in window) my_catalog.demo.customers_scd2: refreshed 0.0 min ago (window 20 min, cutoff 2026-10-09 20:28:27.853154)
           last write: MERGE at 2026-10-09 19:55:26 (numOutputRows=2, numTargetRowsInserted=1, numTargetRowsUpdated=1)
           producer: PIPELINE ea04d2a3-2756-46c9-afe6-f0261d969f99 ran successfully at 2026-10-09 20:48:27.853154 [refreshed by calling upstream job] — no write within the window (run changed no rows)
 
 Summary:
   LAUNCHED        JOB      ajx test - J_gold [weekly]: launched job 'ajx test - J_gold' (job_id=671602292581385, run_id=688914411545641)
-  LAUNCHED        JOB      ajx test - J_silver [default]: launched job 'ajx test - J_silver' (job_id=981506303813293, run_id=974525616971172) — met by producer run without row changes: ['surajb.ajx_test.bronze_orders', 'surajb.ajx_test.customers_scd2']
-  LAUNCHED        PIPELINE ajx test - P5 customer snapshot [default]: started pipeline 'ajx test - P5 customer snapshot' (pipeline_id=b852f721-d9ba-47ae-805b-8634ac26adb4, update_id=fb71d3c9-9a7a-49ac-8b64-04d3aea814ed) — met by producer run without row changes: ['surajb.ajx_test.customers_scd2']
+  LAUNCHED        JOB      ajx test - J_silver [default]: launched job 'ajx test - J_silver' (job_id=981506303813293, run_id=974525616971172) — met by producer run without row changes: ['my_catalog.demo.bronze_orders', 'my_catalog.demo.customers_scd2']
+  LAUNCHED        PIPELINE ajx test - P5 customer snapshot [default]: started pipeline 'ajx test - P5 customer snapshot' (pipeline_id=b852f721-d9ba-47ae-805b-8634ac26adb4, update_id=fb71d3c9-9a7a-49ac-8b64-04d3aea814ed) — met by producer run without row changes: ['my_catalog.demo.customers_scd2']

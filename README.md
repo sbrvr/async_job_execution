@@ -66,7 +66,7 @@ downstream job (on a schedule):
 | `src/async_job_execution/freshness.py` | Freshness rule shared by the launcher and the check. |
 | `src/async_job_execution/common.py` | Spark / SDK helpers, argument parsing, exact name resolution. |
 
-## Tracker table (`surajb.common.entity_tracker`)
+## Tracker table (`<catalog>.<schema>.entity_tracker`)
 
 One row per downstream Job / Pipeline and source group, keyed by `entity_name` + `entity_type` + `src_group`.
 
@@ -104,12 +104,12 @@ this repo (job **Git source**, or a Databricks Git folder); `src/` is the script
 
 | Script | Parameters |
 |---|---|
-| `tracker_setup.py` | — |
+| `tracker_setup.py` | `--tracker_table` only |
 | `upstream_source_tracking.py` | `--entity_type JOB\|PIPELINE --entity_name <name> [--src_group default] [--src_tables <subset>] [--dry_run true] [--max_recursion_depth 5]` |
 | `job_pipeline_launch.py` | `--src_tables <t1>,<t2>,... [--entity_type ALL\|JOB\|PIPELINE] [--dry_run true\|false] [--queue_timeout_mins 60]` |
 | `source_freshness_check.py` | `--entity_type JOB\|PIPELINE --entity_name <name> [--src_group <group>]` (as a gating task: `--entity_name={{job.name}}`) |
 
-All scripts accept `--tracker_table` (default `surajb.common.entity_tracker`). `job_pipeline_launch.py` defaults to
+All scripts require `--tracker_table <catalog>.<schema>.entity_tracker` (the same table for every task). `job_pipeline_launch.py` defaults to
 `--dry_run true`; set `false` to launch.
 
 Example: launch task added as the last task of an upstream job
@@ -122,7 +122,8 @@ Example: launch task added as the last task of an upstream job
   "spark_python_task": {
     "python_file": "src/job_pipeline_launch.py",
     "source": "GIT",
-    "parameters": ["--src_tables=main.silver.customers,main.silver.orders", "--dry_run=false"]
+    "parameters": ["--tracker_table=main.ops.entity_tracker",
+                   "--src_tables=main.silver.customers,main.silver.orders", "--dry_run=false"]
   }
 }
 ```

@@ -4,10 +4,10 @@ Selected 2 tracker row(s) for JOB 'ajx test - J_gold'
     entity_name                        ajx test - J_gold
     entity_type                        JOB
     src_group                          daily
-    target_tables                      ['surajb.ajx_test.gold_product_sales', 'surajb.ajx_test.gold_regional_sales']
-    src_tables                         ['surajb.ajx_test.silver_sales']
+    target_tables                      ['my_catalog.demo.gold_product_sales', 'my_catalog.demo.gold_regional_sales']
+    src_tables                         ['my_catalog.demo.silver_sales']
     src_tables_to_skip                 []
-    src_table_producers                {'surajb.ajx_test.silver_sales': {'producer_type': 'PIPELINE', 'producer_id': 'a7a0bde5-b979-4a21-a430-98e2c07de118'}}
+    src_table_producers                {'my_catalog.demo.silver_sales': {'producer_type': 'PIPELINE', 'producer_id': 'a7a0bde5-b979-4a21-a430-98e2c07de118'}}
     refresh_window_btn_tables_in_mins  20
     created_on                         2026-10-09
     updated_on                         2026-10-09
@@ -15,7 +15,7 @@ Selected 2 tracker row(s) for JOB 'ajx test - J_gold'
     updated_by                         user@example.com
     -> skipped src_tables (0): none
     -> checking 1 src_table(s) against refresh_window_btn_tables_in_mins=20:
-       MET (producer refresh) surajb.ajx_test.silver_sales: refreshed 1.6 min ago (window 20 min, cutoff 2026-10-09 20:30:44.262133)
+       MET (producer refresh) my_catalog.demo.silver_sales: refreshed 1.6 min ago (window 20 min, cutoff 2026-10-09 20:30:44.262133)
           last write: materialized view — no Delta history; refresh and rows from its producer pipeline
           producer: PIPELINE a7a0bde5-b979-4a21-a430-98e2c07de118 refreshed it at 2026-10-09 20:49:10.057000 [pipeline event log, update 3321470d-891f-49da-948e-dd0cd39d5b11: output_rows=5]
 
@@ -23,10 +23,10 @@ Selected 2 tracker row(s) for JOB 'ajx test - J_gold'
     entity_name                        ajx test - J_gold
     entity_type                        JOB
     src_group                          weekly
-    target_tables                      ['surajb.ajx_test.gold_product_sales', 'surajb.ajx_test.gold_regional_sales']
-    src_tables                         ['surajb.ajx_test.bronze_products', 'surajb.ajx_test.bronze_regions']
+    target_tables                      ['my_catalog.demo.gold_product_sales', 'my_catalog.demo.gold_regional_sales']
+    src_tables                         ['my_catalog.demo.bronze_products', 'my_catalog.demo.bronze_regions']
     src_tables_to_skip                 []
-    src_table_producers                {'surajb.ajx_test.bronze_products': {'producer_type': 'PIPELINE', 'producer_id': '78efacec-4a82-435e-93ba-ead711648bf9'}, 'surajb.ajx_test.bronze_regions': {'producer_type': 'PIPELINE', 'producer_id': '78efacec-4a82-435e-93ba-ead711648bf9'}}
+    src_table_producers                {'my_catalog.demo.bronze_products': {'producer_type': 'PIPELINE', 'producer_id': '78efacec-4a82-435e-93ba-ead711648bf9'}, 'my_catalog.demo.bronze_regions': {'producer_type': 'PIPELINE', 'producer_id': '78efacec-4a82-435e-93ba-ead711648bf9'}}
     refresh_window_btn_tables_in_mins  10080
     created_on                         2026-10-09
     updated_on                         2026-10-09
@@ -34,10 +34,10 @@ Selected 2 tracker row(s) for JOB 'ajx test - J_gold'
     updated_by                         user@example.com
     -> skipped src_tables (0): none
     -> checking 2 src_table(s) against refresh_window_btn_tables_in_mins=10080:
-       MET (producer refresh) surajb.ajx_test.bronze_products: refreshed 3.0 min ago (window 10080 min, cutoff 2026-10-02 20:50:44.262133)
+       MET (producer refresh) my_catalog.demo.bronze_products: refreshed 3.0 min ago (window 10080 min, cutoff 2026-10-02 20:50:44.262133)
           last write: materialized view — no Delta history; refresh and rows from its producer pipeline
           producer: PIPELINE 78efacec-4a82-435e-93ba-ead711648bf9 refreshed it at 2026-10-09 20:47:41.769000 [pipeline event log, update 7c3a84a9-bc1b-442c-8391-511bd9617d18: output_rows=2]
-       MET (producer refresh) surajb.ajx_test.bronze_regions: refreshed 3.0 min ago (window 10080 min, cutoff 2026-10-02 20:50:44.262133)
+       MET (producer refresh) my_catalog.demo.bronze_regions: refreshed 3.0 min ago (window 10080 min, cutoff 2026-10-02 20:50:44.262133)
           last write: materialized view — no Delta history; refresh and rows from its producer pipeline
           producer: PIPELINE 78efacec-4a82-435e-93ba-ead711648bf9 refreshed it at 2026-10-09 20:47:41.775000 [pipeline event log, update 7c3a84a9-bc1b-442c-8391-511bd9617d18: output_rows=2]
 

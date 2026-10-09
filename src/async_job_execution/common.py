@@ -22,8 +22,8 @@ def str_to_bool(value: str) -> bool:
 
 def base_parser(description: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=description)
-    parser.add_argument("--tracker_table", default="surajb.common.entity_tracker",
-                        help="Fully qualified name of the tracker table")
+    parser.add_argument("--tracker_table", required=True,
+                        help="Fully qualified name of the tracker table, e.g. <catalog>.<schema>.entity_tracker")
     return parser
 
 
