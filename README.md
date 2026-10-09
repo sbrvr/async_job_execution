@@ -1,4 +1,4 @@
-# async_job_execution
+# Dependency-Aware Job Launching for Databricks SDP
 
 Launch downstream Databricks Jobs / Lakeflow Spark Declarative Pipelines (SDP) only when **all** of their upstream
 source tables have been refreshed within a configurable time window — launched asynchronously by the last task of the
