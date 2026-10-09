@@ -8,18 +8,13 @@ upstream job that refreshes them, or checked by a gating task before a downstrea
 
 Jobs table update triggers only offer **Any table updated** or **All tables updated**:
 
-1. **Mixed cadences (daily + weekly sources).** *All* over everything runs at most weekly; *All* over the daily
-   tables never checks the weekly ones; *Any* fires on every source update. Multiple triggers on one job are
-   **OR-ed** (each fires on its own), so splitting into a daily and a weekly trigger does not give "all of them".
-2. **At most 10 tables per trigger.**
-3. **Only row-changing writes fire.** A MERGE / UPDATE / DELETE that changes no rows, OPTIMIZE and property changes
+1. **Mixed cadences (daily + weekly sources).** For a job which relies on source which has varying cadence with some tables getting updated daily and others getting updated weekly (different file arrival) - its a challenge to set it with any of the option *All tables Updated* or *Any table updated*. The former will make the job wait as there are no updates and later will kick off the job multiple times in a day when weekly files arrive.  Multiple Table triggers are currently not supported for a single job and even if they were supported job would run twice (one for daily and one for weekly) as one trigger cannot be set depened on another trigger(another feature).
+2. **Only row-changing writes fire.** A MERGE / UPDATE / DELETE that changes no rows, OPTIMIZE and property changes
    do not fire. An SCD2 (AUTO CDC) update with nothing new writes no table version at all, so with *All tables
    updated* a job that also depends on a quiet SCD2 table **waits forever**.
-4. **…while no-op re-sends can fire.** AUTO CDC stores every incoming record; re-sending an unchanged record in a
-   later update hides the old physical row and inserts the new one (1 update + 1 insert in storage) although the
-   visible history is unchanged — downstream triggers fire.
-5. **No time window, no timeout.** "All updated" means *since the last run*, not *recently*; if a source never
+3. **No time window, no timeout.** "All updated" means *since the last run*, not *recently*; if a source never
    updates, the job silently never runs.
+4. **At most 10 tables per trigger.**
 
 ## Best suited for SDP jobs
 
