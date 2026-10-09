@@ -1,0 +1,10 @@
+# Local research, backups and the full working spec — not part of the project
+archive/
+
+__pycache__/
+*.pyc
+.venv/
+.idea/
+.vscode/
+.DS_Store
+.databricks/
