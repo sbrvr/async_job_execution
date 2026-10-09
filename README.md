@@ -130,6 +130,20 @@ Example: launch task added as the last task of an upstream job
 with `"git_source": {"git_url": "https://github.com/sbrvr/async_job_execution", "git_provider": "gitHub", "git_branch": "main"}`
 and `"environments": [{"environment_key": "default", "spec": {"environment_version": "4"}}]` on the job.
 
+## Example logs
+
+Captured from a test cascade (`J_upstream` → `J_silver` → `J_gold`, plus a standalone pipeline) where the upstream
+run had **no new raw data**, so its SCD2 pipeline changed no rows:
+
+| Log | Shows |
+|---|---|
+| [`examples/1_upstream_job_launch_task.log`](examples/1_upstream_job_launch_task.log) | Last task of the upstream job: full tracker rows, skipped tables, per-source `MET (refreshed by calling upstream job, no rows changed in window)` / `MET (producer refresh)`, last write rows, and the summary — downstream launched with *"met by producer run without row changes"*. |
+| [`examples/2_silver_job_launch_task.log`](examples/2_silver_job_launch_task.log) | Last task of the silver job launching the gold job via its `daily` source group. |
+| [`examples/3_source_freshness_check.log`](examples/3_source_freshness_check.log) | Gating check of the gold job across its `daily` and `weekly` source groups (each in its own window). |
+
+Each source line starts with `MET (<basis>)` or `NOT MET`, where the basis is `data write`, `producer refresh`
+(materialized view), `producer run, no rows changed` or `refreshed by calling upstream job, no rows changed in window`.
+
 ## Typical setup
 
 1. Run `tracker_setup.py` once.

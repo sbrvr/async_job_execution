@@ -146,6 +146,9 @@ def main():
         if action == "SKIP":
             results.append((etype, name, group, "ALREADY_HANDLED", reason))
             continue
+        no_change = [st.table for st in statuses if st.met_without_row_changes]
+        if no_change:
+            reason = (reason + "; " if reason else "") + f"met by producer run without row changes: {no_change}"
         planned.append((etype, name, group, entity_id, action, reason, set(tables)))
 
     # Don't launch an entity whose sources are about to be refreshed again: a source is a target table of another

@@ -29,6 +29,7 @@ PIPELINE_EVENTS_TABLE = "system.lakeflow_pipeline_events_preview.pipeline_events
 # operationMetrics that count rows impacted by a write (WRITE / MERGE / UPDATE / DELETE / STREAMING UPDATE)
 ROW_METRICS = ("numOutputRows", "numTargetRowsInserted", "numTargetRowsUpdated", "numTargetRowsDeleted",
                "numUpdatedRows", "numDeletedRows", "numCopiedRows")
+REFRESHED_NOW_SIGNAL = "refreshed by calling upstream job"
 # How far back to look for a producer's last success (the window check is applied afterwards)
 PRODUCER_LOOKBACK = timedelta(days=31)
 
@@ -50,11 +51,29 @@ class SourceStatus:
     now: Optional[datetime] = None
     window_mins: Optional[int] = None
 
+    @property
+    def basis(self) -> Optional[str]:
+        """What made the source meet the window (None if it did not)."""
+        if not self.is_fresh:
+            return None
+        if self.last_write and self.cutoff and self.last_write >= self.cutoff:
+            return "data write"
+        if self.last_write_operation == "MATERIALIZED_VIEW":
+            return "producer refresh"
+        if self.producer_signal == REFRESHED_NOW_SIGNAL:
+            return "refreshed by calling upstream job, no rows changed in window"
+        return "producer run, no rows changed"
+
+    @property
+    def met_without_row_changes(self) -> bool:
+        """Met the window only because its producer ran successfully, without writing rows in the window."""
+        return bool(self.basis) and "no rows changed" in self.basis
+
     def describe(self) -> str:
-        """Log lines: met / not met, what refreshed it, and the rows impacted by the last write."""
-        verdict = "MET" if self.is_fresh else "NOT MET"
+        """Log lines: met / not met (and why), what refreshed it, and the rows impacted by the last write."""
+        verdict = f"MET ({self.basis})" if self.is_fresh else "NOT MET"
         age = _age(self.now - self.refreshed_at) + " ago" if self.refreshed_at and self.now else "never"
-        lines = [f"{verdict:<7} {self.table}: refreshed {age} (window {self.window_mins} min, cutoff {self.cutoff})"]
+        lines = [f"{verdict} {self.table}: refreshed {age} (window {self.window_mins} min, cutoff {self.cutoff})"]
         if self.last_write:
             rows = ", ".join(f"{k}={v}" for k, v in (self.last_write_rows or {}).items()) or "0 rows"
             lines.append(f"last write: {self.last_write_operation} at {self.last_write} ({rows})")
@@ -289,7 +308,7 @@ class FreshnessChecker:
             producer_type, producer_id = self.resolve_producer(t, producers)
             success, signal = None, None
             if t in refreshed_now:
-                success, signal = now, "refreshed by calling upstream job"
+                success, signal = now, REFRESHED_NOW_SIGNAL
             elif producer_type == "PIPELINE":
                 success, signal = self.pipeline_last_success(t, producer_id)
             elif producer_type == "JOB":

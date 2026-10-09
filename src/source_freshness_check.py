@@ -41,7 +41,7 @@ def main():
 
     checker = FreshnessChecker(spark, get_workspace_client())
     now = spark.sql("SELECT current_timestamp() AS ts").collect()[0]["ts"]
-    failures = []
+    failures, no_change = [], []
     print(f"Selected {len(rows)} tracker row(s) for {label}")
     for row in rows:  # every source group must be fresh within its own window
         log_tracker_row(row)
@@ -56,6 +56,7 @@ def main():
         print(f"    -> checking {len(tables)} src_table(s) against refresh_window_btn_tables_in_mins={window}:")
         for s in statuses:
             print(f"       {s.describe()}")
+        no_change += [f"{s.table} [{group}]" for s in statuses if s.met_without_row_changes]
         stale = [s.table for s in statuses if not s.is_fresh]
         if stale:
             failures.append(f"src_group '{group}': {len(stale)} of {len(tables)} source(s) not refreshed since "
@@ -63,7 +64,8 @@ def main():
 
     if failures:
         raise Exception(f"Freshness check FAILED for {label}:\n  " + "\n  ".join(failures))
-    print(f"\nFreshness check PASSED for {label}: all {len(rows)} source group(s) fresh.")
+    print(f"\nFreshness check PASSED for {label}: all {len(rows)} source group(s) fresh."
+          + (f" Met by producer run without row changes: {no_change}" if no_change else ""))
 
 
 if __name__ == "__main__":
