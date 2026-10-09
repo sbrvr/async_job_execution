@@ -37,3 +37,16 @@ def resolve_entity(w, entity_type: str, name: str):
     if len(ids) != 1:
         return None, f"expected exactly 1 {entity_type} named '{name}', found {len(ids)}: {ids}"
     return ids[0], None
+
+
+def log_tracker_row(row):
+    """Print a selected tracker row in full, then which of its sources are skipped."""
+    d = row.asDict(recursive=True)
+    print(f"\n=== Tracker row: {d.get('entity_type')} '{d.get('entity_name')}' "
+          f"[src_group {d.get('src_group') or 'default'}]")
+    for key, value in d.items():
+        print(f"    {key:<34} {value}")
+    skipped = sorted(set(d.get("src_tables_to_skip") or []))
+    unknown = sorted(set(skipped) - set(d.get("src_tables") or []))
+    print(f"    -> skipped src_tables ({len(skipped)}): {skipped or 'none'}"
+          + (f" (not in src_tables: {unknown})" if unknown else ""))

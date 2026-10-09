@@ -7,8 +7,10 @@ Given a Job or Pipeline name:
   4. Inputs per owned table come from lineage of that table's latest write (latest pipeline update).
   5. target_tables = owned tables not read by another owned table (final outputs);
      src_tables = inputs the entity does not produce itself, with UC views expanded via their current dependencies.
-  6. src_table_producers = what produces each source: PIPELINE (UC pipeline_id) / JOB (latest lineage writer) / NONE.
-  7. MERGE on entity_name + entity_type, replacing target_tables, src_tables and src_table_producers.
+  6. Source group (--src_group, default "default"): --src_tables narrows the group's sources to a subset of the
+     discovered ones, so one entity can have e.g. a "daily" and a "weekly" row with different sources and windows.
+  7. src_table_producers = what produces each source: PIPELINE (UC pipeline_id) / JOB (latest lineage writer) / NONE.
+  8. MERGE on entity_name + entity_type + src_group, replacing target_tables, src_tables and src_table_producers.
 """
 from databricks.sdk.errors import NotFound, PermissionDenied
 
@@ -21,6 +23,9 @@ def parse_args():
     parser = base_parser("Populate the entity tracker row for a Job or Pipeline")
     parser.add_argument("--entity_type", required=True, choices=ENTITY_TYPES)
     parser.add_argument("--entity_name", required=True, help="Exact name of the Job or Pipeline")
+    parser.add_argument("--src_group", default="default", help="Source group of this row (e.g. daily / weekly)")
+    parser.add_argument("--src_tables", default="",
+                        help="Comma-separated subset of the discovered sources for this group; empty = all")
     parser.add_argument("--max_recursion_depth", type=int, default=5, help="Max depth for view expansion")
     parser.add_argument("--dry_run", default="false", help="true = print the tracker row without writing it")
     return parser.parse_args()
@@ -168,6 +173,7 @@ MERGE INTO IDENTIFIER(:tracker_table) AS target
 USING tracker_source AS source
 ON target.entity_name = source.entity_name
   AND target.entity_type = source.entity_type
+  AND coalesce(target.src_group, 'default') = source.src_group
 -- Existing Job/Pipeline: replace lineage-derived columns (each run rebuilds the full entity);
 -- src_tables_to_skip and the refresh window keep their maintained values
 WHEN MATCHED THEN UPDATE SET
@@ -178,10 +184,10 @@ WHEN MATCHED THEN UPDATE SET
   target.updated_by = current_user()
 -- New Job/Pipeline: empty skip list and a default 5-minute refresh window
 WHEN NOT MATCHED THEN INSERT (
-  entity_name, entity_type, target_tables, src_tables, src_tables_to_skip, src_table_producers,
+  entity_name, entity_type, src_group, target_tables, src_tables, src_tables_to_skip, src_table_producers,
   refresh_window_btn_tables_in_mins, created_on, updated_on, created_by, updated_by
 ) VALUES (
-  source.entity_name, source.entity_type, source.target_tables, source.src_tables, cast(array() AS array<string>),
+  source.entity_name, source.entity_type, source.src_group, source.target_tables, source.src_tables, cast(array() AS array<string>),
   source.src_table_producers, 5, current_timestamp(), current_timestamp(), current_user(), current_user()
 )
 """
@@ -192,7 +198,8 @@ def main():
     dry_run = str_to_bool(args.dry_run)
     spark, w = get_spark(), get_workspace_client()
     workspace_id = str(w.get_workspace_id())
-    print(f"Entity: {args.entity_type} '{args.entity_name}' | tracker: {args.tracker_table} | dry_run: {dry_run}")
+    print(f"Entity: {args.entity_type} '{args.entity_name}' | src_group: {args.src_group} | "
+          f"tracker: {args.tracker_table} | dry_run: {dry_run}")
 
     entity_id, error = resolve_entity(w, args.entity_type, args.entity_name)
     if error:
@@ -215,6 +222,12 @@ def main():
 
     resolved, missing, unresolved = expand_views(w, external_inputs, args.max_recursion_depth)
     src_tables = sorted(resolved - owned_set)  # views expanded into the entity's own tables are not sources
+    subset = {t.strip() for t in args.src_tables.replace(" ", ",").split(",") if t.strip()}
+    if subset:
+        unknown = sorted(subset - set(src_tables))
+        if unknown:
+            raise ValueError(f"--src_tables not among the discovered sources {src_tables}: {unknown}")
+        src_tables = sorted(subset)
     producers = source_producers(spark, w, workspace_id, src_tables)
 
     print(f"target_tables ({len(target_tables)}): {target_tables}")
@@ -227,8 +240,8 @@ def main():
         print(f"Views not expanded (deeper than max_recursion_depth={args.max_recursion_depth}): {sorted(unresolved)}")
 
     tracker_row = spark.createDataFrame(
-        [(args.entity_name, args.entity_type, target_tables, src_tables, producers)],
-        "entity_name STRING, entity_type STRING, target_tables ARRAY<STRING>, src_tables ARRAY<STRING>, "
+        [(args.entity_name, args.entity_type, args.src_group, target_tables, src_tables, producers)],
+        "entity_name STRING, entity_type STRING, src_group STRING, target_tables ARRAY<STRING>, src_tables ARRAY<STRING>, "
         "src_table_producers MAP<STRING, STRUCT<producer_type: STRING, producer_id: STRING>>",
     )
     if dry_run:

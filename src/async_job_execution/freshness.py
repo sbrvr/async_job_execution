@@ -26,6 +26,9 @@ WRITE_OPERATIONS = [
 ]
 # Beta location; moves to system.lakeflow.pipeline_events at GA
 PIPELINE_EVENTS_TABLE = "system.lakeflow_pipeline_events_preview.pipeline_events"
+# operationMetrics that count rows impacted by a write (WRITE / MERGE / UPDATE / DELETE / STREAMING UPDATE)
+ROW_METRICS = ("numOutputRows", "numTargetRowsInserted", "numTargetRowsUpdated", "numTargetRowsDeleted",
+               "numUpdatedRows", "numDeletedRows", "numCopiedRows")
 # How far back to look for a producer's last success (the window check is applied afterwards)
 PRODUCER_LOOKBACK = timedelta(days=31)
 
@@ -41,6 +44,51 @@ class SourceStatus:
     refreshed_at: Optional[datetime]
     is_fresh: bool
     error: Optional[str] = None
+    last_write_operation: Optional[str] = None
+    last_write_rows: Optional[dict] = None  # non-zero row metrics of the last data write
+    cutoff: Optional[datetime] = None
+    now: Optional[datetime] = None
+    window_mins: Optional[int] = None
+
+    def describe(self) -> str:
+        """Log lines: met / not met, what refreshed it, and the rows impacted by the last write."""
+        verdict = "MET" if self.is_fresh else "NOT MET"
+        age = _age(self.now - self.refreshed_at) + " ago" if self.refreshed_at and self.now else "never"
+        lines = [f"{verdict:<7} {self.table}: refreshed {age} (window {self.window_mins} min, cutoff {self.cutoff})"]
+        if self.last_write:
+            rows = ", ".join(f"{k}={v}" for k, v in (self.last_write_rows or {}).items()) or "0 rows"
+            lines.append(f"last write: {self.last_write_operation} at {self.last_write} ({rows})")
+        elif self.last_write_operation == "MATERIALIZED_VIEW":
+            lines.append("last write: materialized view — no Delta history; refresh and rows from its producer pipeline")
+        else:
+            lines.append("last write: none found")
+        producer = f"{self.producer_type} {self.producer_id or ''}".rstrip()
+        if self.producer_success is None:
+            lines.append(f"producer: {producer}" + (f" — {self.producer_signal}" if self.producer_signal else ""))
+        elif self.last_write_operation == "MATERIALIZED_VIEW":
+            lines.append(f"producer: {producer} refreshed it at {self.producer_success} [{self.producer_signal}]")
+        elif self.cutoff and self.producer_success >= self.cutoff and (not self.last_write or self.last_write < self.cutoff):
+            # only the producer run refreshed it: it ran successfully but wrote nothing within the window
+            lines.append(f"producer: {producer} ran successfully at {self.producer_success} "
+                         f"[{self.producer_signal}] — no write within the window (run changed no rows)")
+        else:
+            lines.append(f"producer: {producer} last success {self.producer_success} [{self.producer_signal}]")
+        if self.error:
+            lines.append(f"error: {self.error}")
+        return "\n          ".join(lines)
+
+
+def _age(delta: timedelta) -> str:
+    minutes = delta.total_seconds() / 60
+    if minutes < 120:
+        return f"{minutes:.1f} min"
+    if minutes < 2 * 24 * 60:
+        return f"{minutes / 60:.1f} h"
+    return f"{minutes / 1440:.1f} days"
+
+
+def rows_ok(rows) -> bool:
+    return bool(rows) and rows[0]["t"] is not None
 
 
 def _naive_utc(value) -> Optional[datetime]:
@@ -67,15 +115,26 @@ class FreshnessChecker:
 
     # ---- data writes -------------------------------------------------------------------------------------------
     def last_write(self, table: str):
-        """Return (timestamp, error) of the table's last data write."""
+        """Return (timestamp, operation, row metrics, error) of the table's last data write."""
         if table not in self._last_write:
+            info = self.table_info(table)
+            if info is not None and info.table_type and info.table_type.value == "MATERIALIZED_VIEW":
+                # no Delta history for materialized views: refresh and row counts come from the producer pipeline
+                self._last_write[table] = (None, "MATERIALIZED_VIEW", None, None)
+                return self._last_write[table]
             try:
                 history = self.spark.sql(f"DESCRIBE HISTORY {table}")
                 rows = (history.filter(history.operation.isin(WRITE_OPERATIONS))
                         .orderBy(history.timestamp.desc()).limit(1).collect())
-                self._last_write[table] = (_naive_utc(rows[0]["timestamp"]) if rows else None, None)
+                if rows:
+                    metrics = rows[0]["operationMetrics"] or {}
+                    impacted = {k: metrics[k] for k in ROW_METRICS if metrics.get(k) not in (None, "0")}
+                    self._last_write[table] = (_naive_utc(rows[0]["timestamp"]), rows[0]["operation"], impacted, None)
+                else:
+                    self._last_write[table] = (None, None, None, None)
             except Exception as e:
-                self._last_write[table] = (None, f"DESCRIBE HISTORY failed: {e}")
+                first_line = str(e).strip().splitlines()[0] if str(e).strip() else type(e).__name__
+                self._last_write[table] = (None, None, None, f"DESCRIBE HISTORY failed: {first_line}")
         return self._last_write[table]
 
     def table_info(self, table: str):
@@ -146,6 +205,7 @@ class FreshnessChecker:
             return None
 
     def _from_event_log(self, table, pipeline_id, since):
+        """Latest COMPLETED flow writing `table`, plus the rows that flow run reported (summed flow_progress metrics)."""
         if not all(c.isalnum() or c == "-" for c in pipeline_id):
             return None
         try:
@@ -156,18 +216,35 @@ class FreshnessChecker:
                          replace(details:flow_definition.output_dataset::string, '`', '') AS dataset
                   FROM event_log('{pipeline_id}')
                   WHERE event_type = 'flow_definition'
+                ),
+                progress AS (
+                  SELECT e.timestamp, e.origin.update_id AS update_id, e.origin.flow_name AS flow_name,
+                         e.details:flow_progress.status::string AS status,
+                         coalesce(e.details:flow_progress.metrics.num_output_rows::bigint, 0) AS output_rows,
+                         coalesce(e.details:flow_progress.metrics.num_upserted_rows::bigint, 0) AS upserted_rows,
+                         coalesce(e.details:flow_progress.metrics.num_deleted_rows::bigint, 0) AS deleted_rows
+                  FROM event_log('{pipeline_id}') e
+                  JOIN flows f ON e.origin.flow_name = f.flow_name
+                  WHERE e.event_type = 'flow_progress'
+                    AND e.timestamp >= :since
+                    AND (f.dataset = :table OR :table LIKE concat('%.', f.dataset))
+                ),
+                last_done AS (
+                  SELECT max_by(update_id, timestamp) AS update_id, max(timestamp) AS t
+                  FROM progress WHERE status = 'COMPLETED'
                 )
-                SELECT max(e.timestamp) AS t
-                FROM event_log('{pipeline_id}') e
-                JOIN flows f ON e.origin.flow_name = f.flow_name
-                WHERE e.event_type = 'flow_progress'
-                  AND e.details:flow_progress.status::string = 'COMPLETED'
-                  AND e.timestamp >= :since
-                  AND (f.dataset = :table OR :table LIKE concat('%.', f.dataset))
+                SELECT l.t, l.update_id, sum(p.output_rows) AS output_rows, sum(p.upserted_rows) AS upserted_rows,
+                       sum(p.deleted_rows) AS deleted_rows
+                FROM last_done l LEFT JOIN progress p ON p.update_id = l.update_id
+                GROUP BY l.t, l.update_id
                 """,
                 args={"table": table, "since": since},
-            ).collect()[0]
-            return (_naive_utc(row["t"]), "pipeline event log") if row["t"] else None
+            ).collect()
+            if not rows_ok(row):
+                return None
+            r = row[0]
+            counts = ", ".join(f"{k}={r[k]}" for k in ("output_rows", "upserted_rows", "deleted_rows") if r[k])
+            return _naive_utc(r["t"]), f"pipeline event log, update {r['update_id']}: {counts or '0 rows'}"
         except Exception:
             return None  # no access to the event log — use the next signal
 
@@ -186,6 +263,17 @@ class FreshnessChecker:
             pass
         return None
 
+    def producer_running(self, table: str) -> bool:
+        """True if the table's producing pipeline has an update in progress (the table is about to be refreshed)."""
+        info = self.table_info(table)
+        if info is None or not info.pipeline_id:
+            return False
+        try:
+            state = self.w.pipelines.get(pipeline_id=info.pipeline_id).state
+            return bool(state and state.value in ("RUNNING", "STARTING", "DEPLOYING", "RESETTING"))
+        except Exception:
+            return False
+
     # ---- check -------------------------------------------------------------------------------------------------
     def check(self, tables, refresh_window_mins: int, now: datetime, producers: dict = None, refreshed_now=()):
         """Return (cutoff, [SourceStatus]) for `tables` against the window ending at `now`.
@@ -197,7 +285,7 @@ class FreshnessChecker:
         cutoff = now - timedelta(minutes=refresh_window_mins)
         statuses = []
         for t in tables:
-            last_write, error = self.last_write(t)
+            last_write, operation, impacted, error = self.last_write(t)
             producer_type, producer_id = self.resolve_producer(t, producers)
             success, signal = None, None
             if t in refreshed_now:
@@ -211,5 +299,7 @@ class FreshnessChecker:
             statuses.append(SourceStatus(
                 table=t, last_write=last_write, producer_type=producer_type, producer_id=producer_id,
                 producer_success=success, producer_signal=signal, refreshed_at=refreshed_at,
-                is_fresh=refreshed_at is not None and refreshed_at >= cutoff, error=error))
+                is_fresh=refreshed_at is not None and refreshed_at >= cutoff, error=error,
+                last_write_operation=operation, last_write_rows=impacted, cutoff=cutoff, now=now,
+                window_mins=refresh_window_mins))
         return cutoff, statuses

@@ -61,19 +61,20 @@ downstream job (on a schedule):
 |---|---|
 | `src/tracker_setup.py` | Creates the tracker table (safe to re-run). |
 | `src/upstream_source_tracking.py` | For a Job / Pipeline name: finds its pipelines (job → `pipeline_task`s), the tables they currently manage (lineage targets confirmed by UC `pipeline_id`), the **final** tables (not read by another owned table) and the **external sources** (inputs of each owned table's latest write, minus owned tables, UC views expanded via `view_dependencies`). Records each source's producer and MERGEs one tracker row. |
-| `src/job_pipeline_launch.py` | **Last task of an upstream job**, `--src_tables` = the tables its pipelines just refreshed. Finds tracked entities that use any of them (and don't skip them); those tables count as refreshed now, other sources go through the freshness rule; then exact name resolution → skip if running or already started after the newest source refresh → `run_now` / `start_update`. |
-| `src/source_freshness_check.py` | Optional gating task: fails unless every source (minus skip list) of one entity is fresh — first task of a scheduled downstream job. |
+| `src/job_pipeline_launch.py` | **Last task of an upstream job**, `--src_tables` = the tables its pipelines just refreshed. Finds tracker rows (entity + `src_group`) that use any of them (and don't skip them); those tables count as refreshed now, other sources go through the freshness rule. An entity whose sources are about to be refreshed again (a target of another entity launched in the same task, or its producer pipeline is running) is left `WAITING_ON_UPSTREAM` for that upstream's own launch task. Then: latest run started after the row's newest source refresh → skip; run in progress that started before it (e.g. launched for another `src_group`) → **queue** another; otherwise `run_now` / `start_update`. An entity is launched at most once per task. |
+| `src/source_freshness_check.py` | Optional gating task: fails unless every source (minus skip list) of one entity is fresh — every `src_group` within its own window, or only `--src_group`. First task of a scheduled downstream job. |
 | `src/async_job_execution/freshness.py` | Freshness rule shared by the launcher and the check. |
 | `src/async_job_execution/common.py` | Spark / SDK helpers, argument parsing, exact name resolution. |
 
 ## Tracker table (`surajb.common.entity_tracker`)
 
-One row per downstream Job / Pipeline, keyed by `entity_name` + `entity_type`.
+One row per downstream Job / Pipeline and source group, keyed by `entity_name` + `entity_type` + `src_group`.
 
 | Column | Type | Meaning |
 |---|---|---|
 | `entity_name` | STRING | Job or Pipeline name |
 | `entity_type` | STRING | `JOB` or `PIPELINE` |
+| `src_group` | STRING | Source group (default `default`, e.g. `daily` / `weekly`): own `src_tables` and window; each group launches the entity on its own |
 | `target_tables` | ARRAY<STRING> | Final tables written by the entity |
 | `src_tables` | ARRAY<STRING> | Upstream source tables (views expanded) |
 | `src_tables_to_skip` | ARRAY<STRING> | Sources excluded from the check (manual) |
@@ -104,9 +105,9 @@ this repo (job **Git source**, or a Databricks Git folder); `src/` is the script
 | Script | Parameters |
 |---|---|
 | `tracker_setup.py` | — |
-| `upstream_source_tracking.py` | `--entity_type JOB\|PIPELINE --entity_name <name> [--dry_run true] [--max_recursion_depth 5]` |
-| `job_pipeline_launch.py` | `--src_tables <t1>,<t2>,... [--entity_type ALL\|JOB\|PIPELINE] [--dry_run true\|false]` |
-| `source_freshness_check.py` | `--entity_type JOB\|PIPELINE --entity_name <name>` (as a gating task: `--entity_name={{job.name}}`) |
+| `upstream_source_tracking.py` | `--entity_type JOB\|PIPELINE --entity_name <name> [--src_group default] [--src_tables <subset>] [--dry_run true] [--max_recursion_depth 5]` |
+| `job_pipeline_launch.py` | `--src_tables <t1>,<t2>,... [--entity_type ALL\|JOB\|PIPELINE] [--dry_run true\|false] [--queue_timeout_mins 60]` |
+| `source_freshness_check.py` | `--entity_type JOB\|PIPELINE --entity_name <name> [--src_group <group>]` (as a gating task: `--entity_name={{job.name}}`) |
 
 All scripts accept `--tracker_table` (default `surajb.common.entity_tracker`). `job_pipeline_launch.py` defaults to
 `--dry_run true`; set `false` to launch.
@@ -146,10 +147,17 @@ the source tables and their pipelines / jobs, and permission to run the Jobs / P
 - Only pipeline tasks of a job are tracked; tables written by notebook / other tasks are not discovered (by design —
   see *Best suited for SDP jobs*).
 - `--src_tables` is passed by the upstream job and must match the tracker's fully qualified names.
-- Tables written through pipeline **sinks** have no UC `pipeline_id` and are not tracked as targets.
-- A JOB producer's success is job-level and found from lineage (best effort with several writers).
-- Discovery depends on lineage: a new pipeline / table appears only after its first run's lineage lands.
+- Tables written through pipeline **sinks** have no UC `pipeline_id` and are not tracked as targets. Manually add
+  them to the tracker table as needed.
+- A JOB producer's success is job-level and found from lineage (best effort with several writers). Lineage data does
+  not show up immediately in the system table. Manually update the tracker table as needed.
+- Discovery depends on lineage: a new pipeline / table appears only after its first run's lineage lands. Manually
+  update the tracker table as needed.
 - Entity names are the tracker key: renaming a Job / Pipeline orphans its row.
 - A pipeline tracked standalone *and* inside a tracked job can be launched twice — track it only via the job.
-- One window per entity; per-table windows (e.g. daily vs weekly sources) are not implemented yet —
-  use `src_tables_to_skip` for rarely refreshed sources.
+- One window per source group. For sources on different cadences (e.g. daily vs weekly), register one row per group:
+  `upstream_source_tracking.py --src_group daily --src_tables <daily sources>` and `--src_group weekly
+  --src_tables <weekly sources>`, then set each row's `refresh_window_btn_tables_in_mins`. Each group launches the
+  entity on its own; if the entity is already running for another group, another run is queued (jobs: `run_now` with
+  queueing; pipelines: the launch task waits for the running update, up to `--queue_timeout_mins`). Use
+  `src_tables_to_skip` for sources that should not be checked at all.

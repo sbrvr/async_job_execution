@@ -1,4 +1,4 @@
-"""Create the entity tracker table (one row per Job / Pipeline). Safe to re-run (CREATE TABLE IF NOT EXISTS).
+"""Create the entity tracker table (one row per Job / Pipeline / src_group). Safe to re-run (CREATE TABLE IF NOT EXISTS).
 
 To rebuild after a schema change, drop the table first (deletes all rows) and re-run upstream_source_tracking.py
 for each entity.
@@ -11,6 +11,8 @@ CREATE TABLE IF NOT EXISTS IDENTIFIER(:tracker_table) (
         COMMENT 'Name of the Databricks Job or Lakeflow Declarative Pipeline that writes the target tables',
     entity_type STRING
         COMMENT 'Type of the producing entity: JOB or PIPELINE',
+    src_group STRING
+        COMMENT 'Source group of the entity (e.g. daily / weekly): each group has its own src_tables and window and launches the entity on its own; default = default',
     target_tables ARRAY<STRING>
         COMMENT 'Fully qualified names (catalog.schema.table) of the final tables written by this Job/Pipeline',
     src_tables ARRAY<STRING>
@@ -26,7 +28,7 @@ CREATE TABLE IF NOT EXISTS IDENTIFIER(:tracker_table) (
     created_by STRING COMMENT 'User who inserted the row',
     updated_by STRING COMMENT 'User who last updated the row'
 )
-COMMENT 'Entity tracker: one row per Job/Pipeline with its target tables and upstream source tables'
+COMMENT 'Entity tracker: one row per Job/Pipeline and source group with its target tables and upstream source tables'
 """
 
 
