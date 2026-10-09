@@ -8,7 +8,7 @@ upstream job that refreshes them, or checked by a gating task before a downstrea
 
 Jobs table update triggers only offer **Any table updated** or **All tables updated**:
 
-1. **Mixed cadences (daily + weekly sources).** For a job which relies on source which has varying cadence with some tables getting updated daily and others getting updated weekly (different file arrival) - its a challenge to set it with any of the option *All tables Updated* or *Any table updated*. The former will make the job wait as there are no updates and later will kick off the job multiple times in a day when weekly files arrive.  Multiple Table triggers are currently not supported for a single job and even if they were supported job would run twice (one for daily and one for weekly) as one trigger cannot be set depend on another trigger(another feature).
+1. **Mixed cadences (daily + weekly sources).** For a job which relies on source which has varying cadence with some tables getting updated daily and others getting updated weekly (different file arrival time) - its a challenge to set it with any of the option **All tables Updated** or **Any table updated**. The former will make the job wait as there are no updates and later will kick off the job multiple times in a day when weekly files arrive.  Multiple Table triggers are currently not supported for a single job and even if they were supported job would run twice (one for daily and one for weekly) as one trigger cannot be set depend on another trigger(another feature).
 2. **Only row-changing writes fire.** A MERGE / UPDATE / DELETE that changes no rows, OPTIMIZE and property changes
    do not fire. An SCD2 (AUTO CDC) update with nothing new writes no table version at all, so with *All tables
    updated* a job that also depends on a quiet SCD2 table **waits forever**.
@@ -18,7 +18,11 @@ Jobs table update triggers only offer **Any table updated** or **All tables upda
 
 ## Best suited for SDP jobs
 
-The framework is designed for **upstream jobs whose work is done by SDP pipeline tasks**:
+The framework is designed for jobs whose work is done by **SDP pipeline tasks**. Discovery relies on SDP metadata
+(pipeline-managed tables, flow progress); only **pipeline tasks** of a job are tracked, other task types are skipped.
+It supports two flows:
+
+### Flow 1 — launch from the upstream job (event driven)
 
 ```
 upstream job:  [SDP pipeline task] ──┐
@@ -31,10 +35,25 @@ upstream job:  [SDP pipeline task] ──┐
 - The launch task is the **last task** and depends on all pipeline tasks, so by the time it runs every pipeline has
   **finished** and its tables are complete — the tables passed in `--src_tables` count as refreshed now, even when a
   pipeline update changed no rows (e.g. an SCD2 / AUTO CDC update with nothing new).
-- Discovery also relies on SDP metadata (pipeline-managed tables, flow progress); only **pipeline tasks** of a job
-  are tracked, other task types are skipped.
 - Sources from other producers (other jobs / pipelines) still go through the freshness check, so a downstream entity
   launches only when **all** its sources are fresh.
+
+### Flow 2 — scheduled downstream job checks its own sources (polling)
+
+```
+downstream job (on a schedule):
+
+  [source_freshness_check.py --entity_name={{job.name}}] ──> [SDP pipeline task] ──> [SDP pipeline task]
+          │
+          ├── all src_tables refreshed within the window ──> pipeline tasks run
+          └── any src table stale ──> check task fails, pipeline tasks do not run (retry on the next schedule)
+```
+
+- The freshness check is the **first task**; the pipeline tasks depend on it, so they run only when every source
+  (minus `src_tables_to_skip`) was refreshed within `refresh_window_btn_tables_in_mins`.
+- No upstream job needs changing — useful when the upstream jobs are owned by someone else or are not SDP jobs.
+- A stale source shows up as a failed check task with the stale tables in its error, rather than a job that silently
+  never runs.
 
 ## Components
 
