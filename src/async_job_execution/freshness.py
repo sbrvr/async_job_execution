@@ -4,25 +4,28 @@ A source table counts as refreshed at the later of:
   1. its last data write (DESCRIBE HISTORY, data operations only), and
   2. its producer's last successful run — even if that run changed no rows (e.g. an SCD2 / AUTO CDC update with
      nothing new writes no table version, but the pipeline did process the table):
-       PIPELINE producer (pipeline-managed streaming table / materialized view):
-         a) system pipeline events table — latest COMPLETED flow_progress for the table's uc_table_id
-         b) the pipeline's event log, event_log(<pipeline_id>) — latest COMPLETED flow writing the table
-         c) Pipelines API — latest COMPLETED update that covered the table (whole pipeline or selected)
+       PIPELINE producer (pipeline-managed streaming table / materialized view): the later of
+         a) system pipeline events table — latest COMPLETED flow_progress for the table's uc_table_id (lags), and
+         b) the pipeline's event log, event_log(<pipeline_id>) — latest COMPLETED flow writing the table;
+         c) if neither has one: Pipelines API — latest COMPLETED update that covered the table (whole pipeline or selected)
        JOB producer (table written by a job, from the tracker's src_table_producers): last successful job run.
 Tables passed as `refreshed_now` (just processed by the upstream job calling the check) count as refreshed now.
 Tables with no known producer use the last data write only.
 
-All timestamps are naive UTC.
+All timestamps are naive UTC. Spark timestamps are read as epoch milliseconds (unix_millis), so the result does not
+depend on the session time zone.
 """
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from itertools import islice
 from typing import Optional
 
 # Delta operations that represent an actual write of data (excludes OPTIMIZE, VACUUM, SET TBLPROPERTIES, ...)
 WRITE_OPERATIONS = [
     "WRITE", "MERGE", "DELETE", "UPDATE", "STREAMING UPDATE",
     "CREATE TABLE AS SELECT", "REPLACE TABLE AS SELECT",
-    "CREATE OR REPLACE TABLE AS SELECT",
+    "CREATE OR REPLACE TABLE AS SELECT", "COPY INTO", "TRUNCATE",
+    "DLT REFRESH",  # SDP full refresh truncates the table first, then reloads it (STREAMING UPDATE / MERGE)
 ]
 # Beta location; moves to system.lakeflow.pipeline_events at GA
 PIPELINE_EVENTS_TABLE = "system.lakeflow_pipeline_events_preview.pipeline_events"
@@ -32,6 +35,13 @@ ROW_METRICS = ("numOutputRows", "numTargetRowsInserted", "numTargetRowsUpdated",
 REFRESHED_NOW_SIGNAL = "refreshed by calling upstream job"
 # How far back to look for a producer's last success (the window check is applied afterwards)
 PRODUCER_LOOKBACK = timedelta(days=31)
+# Pipeline states with an update in progress
+ACTIVE_PIPELINE_STATES = {"RUNNING", "STARTING", "DEPLOYING", "RESETTING"}
+# Pipeline update states that are final
+FINAL_UPDATE_STATES = {"COMPLETED", "FAILED", "CANCELED"}
+# Errors meaning the system events table is not usable at all (vs. a transient failure of one query)
+EVENTS_TABLE_UNAVAILABLE = ("TABLE_OR_VIEW_NOT_FOUND", "SCHEMA_NOT_FOUND", "CATALOG_NOT_FOUND", "PERMISSION_DENIED",
+                            "INSUFFICIENT_PERMISSIONS")
 
 
 @dataclass
@@ -50,6 +60,10 @@ class SourceStatus:
     cutoff: Optional[datetime] = None
     now: Optional[datetime] = None
     window_mins: Optional[int] = None
+    # when the data in the table was last refreshed: refreshed_at, except for tables refreshed by the calling upstream
+    # job (refreshed_at = now), where it is the producer's actual completion. A downstream run that started after it
+    # already includes the data.
+    data_refreshed_at: Optional[datetime] = None
 
     @property
     def basis(self) -> Optional[str]:
@@ -73,10 +87,13 @@ class SourceStatus:
         """Log lines: met / not met (and why), what refreshed it, and the rows impacted by the last write."""
         verdict = f"MET ({self.basis})" if self.is_fresh else "NOT MET"
         age = _age(self.now - self.refreshed_at) + " ago" if self.refreshed_at and self.now else "never"
-        lines = [f"{verdict} {self.table}: refreshed {age} (window {self.window_mins} min, cutoff {self.cutoff})"]
+        compare = (f"refreshed_at {utc(self.refreshed_at)} {'>=' if self.is_fresh else '<'} cutoff {utc(self.cutoff)}"
+                   if self.refreshed_at else f"cutoff {utc(self.cutoff)}")
+        lines = [f"{verdict} {self.table}: refreshed {age} — {compare} "
+                 f"(now {utc(self.now)} − window {self.window_mins} min)"]
         if self.last_write:
             rows = ", ".join(f"{k}={v}" for k, v in (self.last_write_rows or {}).items()) or "0 rows"
-            lines.append(f"last write: {self.last_write_operation} at {self.last_write} ({rows})")
+            lines.append(f"last write: {self.last_write_operation} at {utc(self.last_write)} ({rows})")
         elif self.last_write_operation == "MATERIALIZED_VIEW":
             lines.append("last write: materialized view — no Delta history; refresh and rows from its producer pipeline")
         else:
@@ -85,16 +102,24 @@ class SourceStatus:
         if self.producer_success is None:
             lines.append(f"producer: {producer}" + (f" — {self.producer_signal}" if self.producer_signal else ""))
         elif self.last_write_operation == "MATERIALIZED_VIEW":
-            lines.append(f"producer: {producer} refreshed it at {self.producer_success} [{self.producer_signal}]")
+            lines.append(f"producer: {producer} refreshed it at {utc(self.producer_success)} [{self.producer_signal}]")
         elif self.cutoff and self.producer_success >= self.cutoff and (not self.last_write or self.last_write < self.cutoff):
             # only the producer run refreshed it: it ran successfully but wrote nothing within the window
-            lines.append(f"producer: {producer} ran successfully at {self.producer_success} "
+            lines.append(f"producer: {producer} ran successfully at {utc(self.producer_success)} "
                          f"[{self.producer_signal}] — no write within the window (run changed no rows)")
         else:
-            lines.append(f"producer: {producer} last success {self.producer_success} [{self.producer_signal}]")
+            lines.append(f"producer: {producer} last success {utc(self.producer_success)} [{self.producer_signal}]")
+        if self.data_refreshed_at and self.data_refreshed_at != self.refreshed_at:
+            lines.append(f"data refreshed at {utc(self.data_refreshed_at)} (producer's actual completion; "
+                         f"a downstream run started after it already includes the data)")
         if self.error:
             lines.append(f"error: {self.error}")
         return "\n          ".join(lines)
+
+
+def utc(value: Optional[datetime]) -> str:
+    """Log format of a naive-UTC timestamp, labelled UTC."""
+    return f"{value.isoformat(sep=' ', timespec='milliseconds')} UTC" if value else "none"
 
 
 def _age(delta: timedelta) -> str:
@@ -104,10 +129,6 @@ def _age(delta: timedelta) -> str:
     if minutes < 2 * 24 * 60:
         return f"{minutes / 60:.1f} h"
     return f"{minutes / 1440:.1f} days"
-
-
-def rows_ok(rows) -> bool:
-    return bool(rows) and rows[0]["t"] is not None
 
 
 def _naive_utc(value) -> Optional[datetime]:
@@ -129,8 +150,8 @@ class FreshnessChecker:
         self.pipeline_events_table = pipeline_events_table
         self._events_table_available = None
         self._last_write, self._table_info, self._job_success = {}, {}, {}
-        self._pipeline_success = {}
-        self._since = datetime.now(timezone.utc).replace(tzinfo=None) - PRODUCER_LOOKBACK
+        self._pipeline_success, self._event_log = {}, {}
+        self._since_ms = int((datetime.now(timezone.utc) - PRODUCER_LOOKBACK).timestamp() * 1000)
 
     # ---- data writes -------------------------------------------------------------------------------------------
     def last_write(self, table: str):
@@ -144,11 +165,12 @@ class FreshnessChecker:
             try:
                 history = self.spark.sql(f"DESCRIBE HISTORY {table}")
                 rows = (history.filter(history.operation.isin(WRITE_OPERATIONS))
-                        .orderBy(history.timestamp.desc()).limit(1).collect())
+                        .orderBy(history.timestamp.desc()).limit(1)
+                        .selectExpr("unix_millis(timestamp) AS ts", "operation", "operationMetrics").collect())
                 if rows:
                     metrics = rows[0]["operationMetrics"] or {}
                     impacted = {k: metrics[k] for k in ROW_METRICS if metrics.get(k) not in (None, "0")}
-                    self._last_write[table] = (_naive_utc(rows[0]["timestamp"]), rows[0]["operation"], impacted, None)
+                    self._last_write[table] = (_naive_utc(rows[0]["ts"]), rows[0]["operation"], impacted, None)
                 else:
                     self._last_write[table] = (None, None, None, None)
             except Exception as e:
@@ -179,7 +201,8 @@ class FreshnessChecker:
         if job_id not in self._job_success:
             result = None
             try:
-                for run in self.w.jobs.list_runs(job_id=int(job_id), completed_only=True, limit=25):
+                # list_runs pages through the whole run history: look at the latest 25 completed runs only
+                for run in islice(self.w.jobs.list_runs(job_id=int(job_id), completed_only=True, limit=25), 25):
                     if run.state and run.state.result_state and run.state.result_state.value == "SUCCESS":
                         result = (_naive_utc(run.end_time), f"job run {run.run_id}")
                         break
@@ -189,17 +212,20 @@ class FreshnessChecker:
         return self._job_success[job_id]
 
     def pipeline_last_success(self, table: str, pipeline_id: str):
-        """Latest time the pipeline successfully processed `table` (with or without row changes)."""
+        """Latest time the pipeline successfully processed `table` (with or without row changes).
+
+        The later of the events system table and the event log: the system table can lag behind the event log, so
+        taking the first signal found could report a pipeline run that has just completed as an older one.
+        """
         key = (table, pipeline_id)
-        since = self._since
         if key not in self._pipeline_success:
-            self._pipeline_success[key] = (self._from_events_table(table, since)
-                                           or self._from_event_log(table, pipeline_id, since)
-                                           or self._from_pipeline_updates(table, pipeline_id)
+            signals = [s for s in (self._from_events_table(table), self._from_event_log(table, pipeline_id)) if s]
+            self._pipeline_success[key] = (max(signals, key=lambda s: s[0]) if signals
+                                           else self._from_pipeline_updates(table, pipeline_id)
                                            or (None, "no completed pipeline run found"))
         return self._pipeline_success[key]
 
-    def _from_events_table(self, table, since):
+    def _from_events_table(self, table):
         if self._events_table_available is False:
             return None
         info = self.table_info(table)
@@ -208,64 +234,73 @@ class FreshnessChecker:
         try:
             row = self.spark.sql(
                 f"""
-                SELECT max(event_time) AS t
+                SELECT unix_millis(max(event_time)) AS t
                 FROM {self.pipeline_events_table}
                 WHERE event_type = 'flow_progress'
                   AND variant_get(details, '$.flow_progress.status', 'STRING') = 'COMPLETED'
                   AND origin.uc_table_id = :table_id
-                  AND event_time >= :since
+                  AND event_time >= timestamp_millis(:since_ms)
                 """,
-                args={"table_id": info.table_id, "since": since},
+                args={"table_id": info.table_id, "since_ms": self._since_ms},
             ).collect()[0]
             self._events_table_available = True
-            return (_naive_utc(row["t"]), "pipeline_events system table") if row["t"] else None
-        except Exception:
-            self._events_table_available = False  # not enabled / no access — use the next signal
-            return None
+            return (_naive_utc(row["t"]), "pipeline_events system table") if row["t"] is not None else None
+        except Exception as e:
+            if any(marker in str(e) for marker in EVENTS_TABLE_UNAVAILABLE):
+                self._events_table_available = False  # not enabled / no access — skip it for the rest of the sweep
+            return None  # use the event log
 
-    def _from_event_log(self, table, pipeline_id, since):
+    def _from_event_log(self, table, pipeline_id):
         """Latest COMPLETED flow writing `table`, plus the rows that flow run reported (summed flow_progress metrics)."""
-        if not all(c.isalnum() or c == "-" for c in pipeline_id):
+        latest = [r for r in self._event_log_by_dataset(pipeline_id)
+                  if r["dataset"] == table or table.endswith("." + r["dataset"])]
+        if not latest:
             return None
-        try:
-            row = self.spark.sql(
-                f"""
-                WITH flows AS (  -- flow -> table it writes (AUTO CDC / append flows are named differently)
-                  SELECT DISTINCT origin.flow_name AS flow_name,
-                         replace(details:flow_definition.output_dataset::string, '`', '') AS dataset
-                  FROM event_log('{pipeline_id}')
-                  WHERE event_type = 'flow_definition'
-                ),
-                progress AS (
-                  SELECT e.timestamp, e.origin.update_id AS update_id, e.origin.flow_name AS flow_name,
-                         e.details:flow_progress.status::string AS status,
-                         coalesce(e.details:flow_progress.metrics.num_output_rows::bigint, 0) AS output_rows,
-                         coalesce(e.details:flow_progress.metrics.num_upserted_rows::bigint, 0) AS upserted_rows,
-                         coalesce(e.details:flow_progress.metrics.num_deleted_rows::bigint, 0) AS deleted_rows
-                  FROM event_log('{pipeline_id}') e
-                  JOIN flows f ON e.origin.flow_name = f.flow_name
-                  WHERE e.event_type = 'flow_progress'
-                    AND e.timestamp >= :since
-                    AND (f.dataset = :table OR :table LIKE concat('%.', f.dataset))
-                ),
-                last_done AS (
-                  SELECT max_by(update_id, timestamp) AS update_id, max(timestamp) AS t
-                  FROM progress WHERE status = 'COMPLETED'
-                )
-                SELECT l.t, l.update_id, sum(p.output_rows) AS output_rows, sum(p.upserted_rows) AS upserted_rows,
-                       sum(p.deleted_rows) AS deleted_rows
-                FROM last_done l LEFT JOIN progress p ON p.update_id = l.update_id
-                GROUP BY l.t, l.update_id
-                """,
-                args={"table": table, "since": since},
-            ).collect()
-            if not rows_ok(row):
-                return None
-            r = row[0]
-            counts = ", ".join(f"{k}={r[k]}" for k in ("output_rows", "upserted_rows", "deleted_rows") if r[k])
-            return _naive_utc(r["t"]), f"pipeline event log, update {r['update_id']}: {counts or '0 rows'}"
-        except Exception:
-            return None  # no access to the event log — use the next signal
+        r = max(latest, key=lambda r: r["t"])
+        counts = ", ".join(f"{k}={r[k]}" for k in ("output_rows", "upserted_rows", "deleted_rows") if r[k])
+        return _naive_utc(r["t"]), f"pipeline event log, update {r['update_id']}: {counts or '0 rows'}"
+
+    def _event_log_by_dataset(self, pipeline_id):
+        """One event_log() query per pipeline: per dataset, its latest COMPLETED update and the rows reported in it."""
+        if pipeline_id not in self._event_log:
+            rows = []
+            if all(c.isalnum() or c == "-" for c in pipeline_id):
+                try:
+                    rows = self.spark.sql(
+                        f"""
+                        WITH flows AS (  -- flow -> table it writes (AUTO CDC / append flows are named differently)
+                          SELECT DISTINCT origin.flow_name AS flow_name,
+                                 replace(details:flow_definition.output_dataset::string, '`', '') AS dataset
+                          FROM event_log('{pipeline_id}')
+                          WHERE event_type = 'flow_definition'
+                        ),
+                        progress AS (
+                          SELECT f.dataset, e.timestamp, e.origin.update_id AS update_id,
+                                 e.details:flow_progress.status::string AS status,
+                                 coalesce(e.details:flow_progress.metrics.num_output_rows::bigint, 0) AS output_rows,
+                                 coalesce(e.details:flow_progress.metrics.num_upserted_rows::bigint, 0) AS upserted_rows,
+                                 coalesce(e.details:flow_progress.metrics.num_deleted_rows::bigint, 0) AS deleted_rows
+                          FROM event_log('{pipeline_id}') e
+                          JOIN flows f ON e.origin.flow_name = f.flow_name
+                          WHERE e.event_type = 'flow_progress'
+                            AND e.timestamp >= timestamp_millis(:since_ms)
+                        ),
+                        last_done AS (
+                          SELECT dataset, max_by(update_id, timestamp) AS update_id, max(timestamp) AS t
+                          FROM progress WHERE status = 'COMPLETED'
+                          GROUP BY dataset
+                        )
+                        SELECT l.dataset, unix_millis(l.t) AS t, l.update_id, sum(p.output_rows) AS output_rows,
+                               sum(p.upserted_rows) AS upserted_rows, sum(p.deleted_rows) AS deleted_rows
+                        FROM last_done l LEFT JOIN progress p ON p.dataset = l.dataset AND p.update_id = l.update_id
+                        GROUP BY l.dataset, l.t, l.update_id
+                        """,
+                        args={"since_ms": self._since_ms},
+                    ).collect()
+                except Exception:
+                    pass  # no access to the event log — use the next signal
+            self._event_log[pipeline_id] = [r for r in rows if r["t"] is not None and r["dataset"]]
+        return self._event_log[pipeline_id]
 
     def _from_pipeline_updates(self, table, pipeline_id):
         try:
@@ -282,16 +317,26 @@ class FreshnessChecker:
             pass
         return None
 
-    def producer_running(self, table: str) -> bool:
-        """True if the table's producing pipeline has an update in progress (the table is about to be refreshed)."""
+    def producer_update(self, table: str):
+        """(pipeline_id, update_id, cause) of the update in progress of the table's producing pipeline, else None.
+
+        Continuous pipelines are always running, so they never count: their tables are refreshed continuously and
+        their freshness comes from their latest completed flow. Not cached: the state changes while the task waits.
+        """
         info = self.table_info(table)
         if info is None or not info.pipeline_id:
-            return False
+            return None
         try:
-            state = self.w.pipelines.get(pipeline_id=info.pipeline_id).state
-            return bool(state and state.value in ("RUNNING", "STARTING", "DEPLOYING", "RESETTING"))
+            p = self.w.pipelines.get(pipeline_id=info.pipeline_id)
+            if (p.spec and p.spec.continuous) or not (p.state and p.state.value in ACTIVE_PIPELINE_STATES):
+                return None
+            for u in p.latest_updates or []:
+                if u.state and u.state.value not in FINAL_UPDATE_STATES:
+                    update = self.w.pipelines.get_update(pipeline_id=info.pipeline_id, update_id=u.update_id).update
+                    return info.pipeline_id, u.update_id, (update.cause.value if update and update.cause else None)
         except Exception:
-            return False
+            pass
+        return None
 
     # ---- check -------------------------------------------------------------------------------------------------
     def check(self, tables, refresh_window_mins: int, now: datetime, producers: dict = None, refreshed_now=()):
@@ -306,9 +351,12 @@ class FreshnessChecker:
         for t in tables:
             last_write, operation, impacted, error = self.last_write(t)
             producer_type, producer_id = self.resolve_producer(t, producers)
-            success, signal = None, None
+            success, signal, completed = None, None, None
             if t in refreshed_now:
                 success, signal = now, REFRESHED_NOW_SIGNAL
+                # actual completion from the event log (real time; the events system table lags), else now
+                logged = self._from_event_log(t, producer_id) if producer_type == "PIPELINE" else None
+                completed = logged[0] if logged else now
             elif producer_type == "PIPELINE":
                 success, signal = self.pipeline_last_success(t, producer_id)
             elif producer_type == "JOB":
@@ -320,5 +368,7 @@ class FreshnessChecker:
                 producer_success=success, producer_signal=signal, refreshed_at=refreshed_at,
                 is_fresh=refreshed_at is not None and refreshed_at >= cutoff, error=error,
                 last_write_operation=operation, last_write_rows=impacted, cutoff=cutoff, now=now,
-                window_mins=refresh_window_mins))
+                window_mins=refresh_window_mins,
+                data_refreshed_at=max([x for x in (last_write, completed) if x], default=None) if completed
+                else refreshed_at))
         return cutoff, statuses
