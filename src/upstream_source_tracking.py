@@ -1,4 +1,7 @@
-"""Discover a Job's / Pipeline's target tables and upstream sources and upsert its row in the entity tracker.
+"""BETA: discover a Job's / Pipeline's target tables and upstream sources and upsert its row in the tracker.
+
+Tracker rows can also be written by hand (README: Manual tracker edits); the freshness check and the launcher read
+them as they are. Run with --dry_run true first and review the row (limitations: README, upstream_source_tracking.py).
 
 Given a Job or Pipeline name:
   1. Resolve the name to exactly one Job / Pipeline.
@@ -202,6 +205,8 @@ def main():
     dry_run = str_to_bool(args.dry_run)
     spark, w = get_spark(), get_workspace_client()
     workspace_id = str(w.get_workspace_id())
+    print("upstream_source_tracking.py is BETA: review the generated row (tracker rows can also be written "
+          "by hand)")
     print(f"Entity: {args.entity_type} '{args.entity_name}' | src_group: {args.src_group} | "
           f"tracker: {args.tracker_table} | dry_run: {dry_run}")
 
