@@ -27,6 +27,8 @@ def parse_args():
     parser.add_argument("--src_tables", default="",
                         help="Comma-separated subset of the discovered sources for this group; empty = all")
     parser.add_argument("--max_recursion_depth", type=int, default=5, help="Max depth for view expansion")
+    parser.add_argument("--lineage_lookback_days", type=int, default=90,
+                        help="How many days of system.access.table_lineage to read")
     parser.add_argument("--dry_run", default="false", help="true = print the tracker row without writing it")
     return parser.parse_args()
 
@@ -46,7 +48,7 @@ def pipelines_of(w, entity_type, entity_id):
     return sorted(set(pipeline_ids))
 
 
-def owned_tables(spark, w, workspace_id, pipeline_ids):
+def owned_tables(spark, w, workspace_id, pipeline_ids, lookback_days):
     """Lineage targets of the pipelines that UC still shows as managed by them."""
     candidates = [r["target_table_full_name"] for r in spark.sql(
         """
@@ -56,8 +58,9 @@ def owned_tables(spark, w, workspace_id, pipeline_ids):
           AND entity_type = 'PIPELINE'  -- also when a job triggers the pipeline
           AND array_contains(:pipeline_ids, entity_id)
           AND target_table_full_name IS NOT NULL
+          AND event_date >= date_sub(current_date(), :days)
         """,
-        args={"ws": workspace_id, "pipeline_ids": pipeline_ids},
+        args={"ws": workspace_id, "pipeline_ids": pipeline_ids, "days": lookback_days},
     ).collect()]
     owned, ignored = [], []
     for name in sorted(candidates):
@@ -78,7 +81,7 @@ def owned_tables(spark, w, workspace_id, pipeline_ids):
     return owned
 
 
-def table_edges(spark, workspace_id, pipeline_ids, owned):
+def table_edges(spark, workspace_id, pipeline_ids, owned, lookback_days):
     """(target, source) pairs from each owned table's latest write (latest pipeline update = lineage entity_run_id)."""
     return spark.sql(
         """
@@ -90,6 +93,7 @@ def table_edges(spark, workspace_id, pipeline_ids, owned):
             AND array_contains(:pipeline_ids, entity_id)
             AND array_contains(:owned, target_table_full_name)
             AND entity_run_id IS NOT NULL
+            AND event_date >= date_sub(current_date(), :days)
         ),
         latest_run AS (
           SELECT target_table_full_name, max_by(entity_run_id, event_time) AS entity_run_id
@@ -102,7 +106,7 @@ def table_edges(spark, workspace_id, pipeline_ids, owned):
         WHERE w.source_table_full_name IS NOT NULL
           AND w.source_table_full_name != w.target_table_full_name
         """,
-        args={"ws": workspace_id, "pipeline_ids": pipeline_ids, "owned": owned},
+        args={"ws": workspace_id, "pipeline_ids": pipeline_ids, "owned": owned, "days": lookback_days},
     ).collect()
 
 
@@ -139,7 +143,7 @@ def expand_views(w, names, max_depth):
     return tables, missing, unresolved
 
 
-def source_producers(spark, w, workspace_id, src_tables):
+def source_producers(spark, w, workspace_id, src_tables, lookback_days):
     """PIPELINE (UC pipeline_id, exact) / JOB (job behind the latest lineage write, best effort) / NONE."""
     job_writers = {r["table"]: r["job_id"] for r in spark.sql(
         """
@@ -148,10 +152,10 @@ def source_producers(spark, w, workspace_id, src_tables):
         WHERE workspace_id = :ws
           AND entity_type = 'JOB'
           AND array_contains(:tables, target_table_full_name)
-          AND event_date >= current_date() - INTERVAL 90 DAYS
+          AND event_date >= date_sub(current_date(), :days)
         GROUP BY target_table_full_name
         """,
-        args={"ws": workspace_id, "tables": src_tables or [""]},
+        args={"ws": workspace_id, "tables": src_tables or [""], "days": lookback_days},
     ).collect()}
     producers = {}
     for t in src_tables:
@@ -209,11 +213,12 @@ def main():
         raise ValueError(f"{args.entity_type} '{args.entity_name}' has no pipeline tasks — nothing to track.")
     print(f"Resolved {args.entity_type} -> {entity_id}; pipelines: {pipeline_ids}")
 
-    owned = owned_tables(spark, w, workspace_id, pipeline_ids)
+    owned = owned_tables(spark, w, workspace_id, pipeline_ids, args.lineage_lookback_days)
     if not owned:
-        raise ValueError(f"No tables currently managed by {pipeline_ids}. Has the pipeline run at least once?")
+        raise ValueError(f"No tables currently managed by {pipeline_ids} in the last {args.lineage_lookback_days} days "
+                         f"of lineage. Has the pipeline run at least once?")
 
-    edges = table_edges(spark, workspace_id, pipeline_ids, owned)
+    edges = table_edges(spark, workspace_id, pipeline_ids, owned, args.lineage_lookback_days)
     owned_set = set(owned)
     target_tables = sorted(owned_set - {e["source"] for e in edges if e["source"] in owned_set})
     external_inputs = sorted({e["source"] for e in edges if e["source"] not in owned_set})
@@ -228,7 +233,7 @@ def main():
         if unknown:
             raise ValueError(f"--src_tables not among the discovered sources {src_tables}: {unknown}")
         src_tables = sorted(subset)
-    producers = source_producers(spark, w, workspace_id, src_tables)
+    producers = source_producers(spark, w, workspace_id, src_tables, args.lineage_lookback_days)
 
     print(f"target_tables ({len(target_tables)}): {target_tables}")
     print(f"src_tables ({len(src_tables)}):")

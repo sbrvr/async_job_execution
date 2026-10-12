@@ -1,3 +1,4 @@
+Now: 2026-10-12 10:26:09.329 UTC (epoch ms 1791800769329); all times below are UTC, independent of the session time zone (Etc/UTC)
 Selected 2 tracker row(s) for JOB 'ajx test - J_gold'
 
 === Tracker row: JOB 'ajx test - J_gold' [src_group daily]
@@ -15,9 +16,9 @@ Selected 2 tracker row(s) for JOB 'ajx test - J_gold'
     updated_by                         user@example.com
     -> skipped src_tables (0): none
     -> checking 1 src_table(s) against refresh_window_btn_tables_in_mins=20:
-       MET (producer refresh) my_catalog.demo.silver_sales: refreshed 1.6 min ago (window 20 min, cutoff 2026-10-09 20:30:44.262133)
+       MET (producer refresh) my_catalog.demo.silver_sales: refreshed 2.4 min ago — refreshed_at 2026-10-12 10:23:47.258 UTC >= cutoff 2026-10-12 10:06:09.329 UTC (now 2026-10-12 10:26:09.329 UTC − window 20 min)
           last write: materialized view — no Delta history; refresh and rows from its producer pipeline
-          producer: PIPELINE a7a0bde5-b979-4a21-a430-98e2c07de118 refreshed it at 2026-10-09 20:49:10.057000 [pipeline event log, update 3321470d-891f-49da-948e-dd0cd39d5b11: output_rows=5]
+          producer: PIPELINE a7a0bde5-b979-4a21-a430-98e2c07de118 refreshed it at 2026-10-12 10:23:47.258 UTC [pipeline event log, update d79cabdf-a69c-4bd4-a58c-00c216fbb04c: output_rows=5]
 
 === Tracker row: JOB 'ajx test - J_gold' [src_group weekly]
     entity_name                        ajx test - J_gold
@@ -34,11 +35,11 @@ Selected 2 tracker row(s) for JOB 'ajx test - J_gold'
     updated_by                         user@example.com
     -> skipped src_tables (0): none
     -> checking 2 src_table(s) against refresh_window_btn_tables_in_mins=10080:
-       MET (producer refresh) my_catalog.demo.bronze_products: refreshed 3.0 min ago (window 10080 min, cutoff 2026-10-02 20:50:44.262133)
+       MET (producer refresh) my_catalog.demo.bronze_products: refreshed 3.3 min ago — refreshed_at 2026-10-12 10:22:50.270 UTC >= cutoff 2026-10-05 10:26:09.329 UTC (now 2026-10-12 10:26:09.329 UTC − window 10080 min)
           last write: materialized view — no Delta history; refresh and rows from its producer pipeline
-          producer: PIPELINE 78efacec-4a82-435e-93ba-ead711648bf9 refreshed it at 2026-10-09 20:47:41.769000 [pipeline event log, update 7c3a84a9-bc1b-442c-8391-511bd9617d18: output_rows=2]
-       MET (producer refresh) my_catalog.demo.bronze_regions: refreshed 3.0 min ago (window 10080 min, cutoff 2026-10-02 20:50:44.262133)
+          producer: PIPELINE 78efacec-4a82-435e-93ba-ead711648bf9 refreshed it at 2026-10-12 10:22:50.270 UTC [pipeline event log, update e4b222cc-c2b1-4a3f-b37e-78f40c4d6089: output_rows=2]
+       MET (producer refresh) my_catalog.demo.bronze_regions: refreshed 3.3 min ago — refreshed_at 2026-10-12 10:22:50.279 UTC >= cutoff 2026-10-05 10:26:09.329 UTC (now 2026-10-12 10:26:09.329 UTC − window 10080 min)
           last write: materialized view — no Delta history; refresh and rows from its producer pipeline
-          producer: PIPELINE 78efacec-4a82-435e-93ba-ead711648bf9 refreshed it at 2026-10-09 20:47:41.775000 [pipeline event log, update 7c3a84a9-bc1b-442c-8391-511bd9617d18: output_rows=2]
+          producer: PIPELINE 78efacec-4a82-435e-93ba-ead711648bf9 refreshed it at 2026-10-12 10:22:50.279 UTC [pipeline event log, update e4b222cc-c2b1-4a3f-b37e-78f40c4d6089: output_rows=2]
 
 Freshness check PASSED for JOB 'ajx test - J_gold': all 2 source group(s) fresh.
