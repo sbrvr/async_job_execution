@@ -298,28 +298,52 @@ the source tables and their pipelines / jobs, and permission to run the Jobs / P
 
 ## Known gaps
 
+**Discovery and the tracker**
 - Only pipeline tasks of a job are tracked; tables written by notebook / other tasks are not discovered (by design —
   see *Best suited for SDP jobs*).
-- `--src_tables` is passed by the upstream job and must match the tracker's fully qualified names.
-- A job's launch task is recognised by its `python_file` ending in `job_pipeline_launch.py` and literal `--src_tables`
-  values; values set through job parameter references (`{{job.parameters...}}`) are not resolved, so that job is
-  waited on instead of handed off to.
-- Waiting for a running upstream keeps the calling job's launch task running, up to `--queue_timeout_mins`.
-- A handoff (`WAITING_ON_UPSTREAM`) relies on the upstream job's launch task: if that job fails or is cancelled before
-  its launch task runs, the entity is not launched by either task (run the scheduled check, Flow 2, as a safety net).
-- `CLONE` and `RESTORE` are not counted as data writes (not typical ETL operations): a source refreshed only by a
-  clone or restore is fresh only if its producer (`PIPELINE` / `JOB`) ran within the window.
+- Discovery depends on lineage: a new pipeline / table appears only after its first run's lineage lands, and only
+  writes within `--lineage_lookback_days` (default 90) are read — a pipeline or JOB producer that has not written in
+  that period is not found. Manually update the tracker table as needed.
 - Tables written through pipeline **sinks** have no UC `pipeline_id` and are not tracked as targets. Manually add
   them to the tracker table as needed.
 - A JOB producer's success is job-level and found from lineage (best effort with several writers). Lineage data does
   not show up immediately in the system table. Manually update the tracker table as needed.
-- Discovery depends on lineage: a new pipeline / table appears only after its first run's lineage lands. Manually
-  update the tracker table as needed.
 - Entity names are the tracker key: renaming a Job / Pipeline orphans its row.
+
+**Freshness**
+- `CLONE` and `RESTORE` are not counted as data writes (not typical ETL operations): a source refreshed only by a
+  clone or restore is fresh only if its producer (`PIPELINE` / `JOB`) ran within the window.
+- If the pipeline's `event_log()` cannot be read, only the system events table is used; it lags (about 1 min p99), so
+  a pipeline that has just finished can look stale for that long.
+- One window per source group. For sources on different cadences (e.g. daily vs weekly), register one row per group
+  (`upstream_source_tracking.py --src_group daily --src_tables <daily sources>`, `--src_group weekly --src_tables
+  <weekly sources>`) and set each row's `refresh_window_btn_tables_in_mins`. Use `src_tables_to_skip` for sources
+  that should not be checked at all.
+
+**Launching (Flow 1)**
+- `--src_tables` is passed by the upstream job and must match the tracker's fully qualified names, and must be tables
+  its pipelines actually refreshed: their pipeline's completion (event log) is compared with the downstream's last
+  run, so a table that was not refreshed can make the downstream look `ALREADY_HANDLED`.
+- A job's launch task is recognised by its `python_file` ending in `job_pipeline_launch.py` and its literal
+  `--src_tables`, `--entity_type` and `--dry_run` values. Job parameter references (`{{job.parameters...}}`) are not
+  resolved: that job is waited on instead of handed off to.
+- A handoff (`WAITING_ON_UPSTREAM`) relies on the upstream job's launch task: if that job fails or is cancelled before
+  its launch task runs, the entity is not launched by either task (run the scheduled check, Flow 2, as a safety net).
+- `UPSTREAM_FAILED` (the awaited upstream run failed) and `SKIPPED` (sources stale after the wait) are reported but do
+  not fail the launch task; the entity is not launched.
+- Waiting keeps the calling job's launch task running. All waits of a task — for a running upstream, or to queue a
+  pipeline update behind a running one — share one `--queue_timeout_mins` deadline; a wait that runs out is
+  `QUEUE_TIMEOUT` and fails the task unless `--fail_on_queue_timeout false`.
+- Each source group is its own launch rule, but within one task an entity is launched at most once (unless a group
+  waited for an upstream and its re-check finds the earlier run does not include the new data — then another run is
+  queued: jobs `run_now` with queueing, pipelines after the running update).
+- A cycle between tracked entities (each reads the other's targets) is broken by launching one side without waiting.
 - A pipeline tracked standalone *and* inside a tracked job can be launched twice — track it only via the job.
-- One window per source group. For sources on different cadences (e.g. daily vs weekly), register one row per group:
-  `upstream_source_tracking.py --src_group daily --src_tables <daily sources>` and `--src_group weekly
-  --src_tables <weekly sources>`, then set each row's `refresh_window_btn_tables_in_mins`. Each group launches the
-  entity on its own; if the entity is already running for another group, another run is queued (jobs: `run_now` with
-  queueing; pipelines: the launch task waits for the running update, up to `--queue_timeout_mins`). Use
-  `src_tables_to_skip` for sources that should not be checked at all.
+- Finding the job that runs a running producer pipeline (for a handoff) lists all active job runs in the workspace.
+
+**Scheduled check (Flow 2)**
+- It does not wait for a running upstream: a tick can pass on the previous refresh while an upstream is mid-update
+  (the next tick picks up the new data).
+- `--skip_if_already_processed` looks at the entity's last 25 runs for the previous successful one; if none of them
+  succeeded, the tick runs (errs on the side of running).
+- Every source group must be fresh unless `--src_group` is given — see *Every source group must pass by default*.
