@@ -168,7 +168,8 @@ def test_hands_off_to_upstream_job_with_launch_task(fake_checker):
 
 
 @pytest.mark.parametrize("params", [launch_params(["u.t1"], dry_run="true"), launch_params(["u.t1"], entity_type="PIPELINE"),
-                                    ["--tracker_table=x", "--src_tables=u.t1"]])  # --dry_run defaults to true
+                                    ["--tracker_table=x", "--src_tables=u.t1"],  # --dry_run defaults to true
+                                    launch_params(["u.t1"], dry_run="{{job.parameters.dry_run}}")])  # unresolved
 def test_no_handoff_to_launch_task_that_would_not_launch(fake_checker, params):
     w = FakeW(launch_jobs={"10": params})
     res = run(w, [plan("JOB", "U", "10", ["x.src"]), plan("JOB", "B", "2", ["u.t1"])], {("JOB", "U"): {"u.t1"}})

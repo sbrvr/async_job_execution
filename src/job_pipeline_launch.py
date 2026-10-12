@@ -183,8 +183,9 @@ class Handoff:
                         elif p == name and i + 1 < len(params):
                             values[name] = params[i + 1]
                 tables = {x.strip() for x in values.get("--src_tables", "").replace(" ", ",").split(",") if x.strip()}
-                tasks.append((tables, values.get("--entity_type", "ALL").upper(),
-                              str_to_bool(values.get("--dry_run", "true"))))  # the launch task defaults to a dry run
+                dry_run = values.get("--dry_run", "true")  # the launch task defaults to a dry run
+                # a {{job.parameters...}} reference is not resolved here: assume it may be a dry run (no handoff)
+                tasks.append((tables, values.get("--entity_type", "ALL").upper(), "{{" in dry_run or str_to_bool(dry_run)))
             self._tables[job_id] = tasks
         return set().union(*[tables for tables, etype, dry_run in self._tables[job_id]
                              if not dry_run and etype in ("ALL", entity_type)])
