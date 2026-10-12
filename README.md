@@ -2,9 +2,9 @@
 
 Launch downstream Databricks Jobs / Lakeflow Spark Declarative Pipelines (SDP) only when **all** of their upstream
 source tables have been refreshed within a configurable time window — launched asynchronously by the last task of the
-upstream job that refreshes them, or checked by a gating task before a downstream job runs.
+upstream job that refreshes them, or checked by a scheduled gating task before a downstream job runs.
 
-## Why not table update triggers
+## When you hit table update triggers limitations
 
 Jobs table update triggers only offer **Any table updated** or **All tables updated**:
 
@@ -18,9 +18,11 @@ Jobs table update triggers only offer **Any table updated** or **All tables upda
 
 ## Best suited for SDP jobs
 
-The framework is designed for jobs whose work is done by **SDP pipeline tasks**. Discovery relies on SDP metadata
-(pipeline-managed tables, flow progress); only **pipeline tasks** of a job are tracked, other task types are skipped.
-It supports two flows:
+The framework is designed for jobs whose work is done by **SDP pipeline tasks**: the freshness rule uses SDP metadata
+(pipeline-managed tables, flow progress). The freshness check and the launcher work from the tracker table, whose rows
+can be written by hand for any Job / Pipeline (see [Manual tracker edits](#manual-tracker-edits)); generating them
+automatically with `upstream_source_tracking.py` is **beta** and follows only the **pipeline tasks** of a job
+(see [upstream_source_tracking.py (beta)](#upstream_source_trackingpy-beta)). It supports two flows:
 
 ### Flow 1 — launch from the upstream job (event driven)
 
@@ -66,14 +68,21 @@ downstream job (on a schedule):
 A stale tick fails the check task, so the pipeline tasks are *upstream failed* and the **whole job run is Failed**. In
 Flow 2 that is normal, not an error: a job scheduled every 15 minutes whose silver sources refresh hourly fails about 3
 ticks out of 4 by design. Alerting on every failure trains people to ignore the alert that matters — a source stuck
-for hours because an upstream pipeline is broken. Instead:
+for hours because an upstream pipeline is broken.
+
+**Recommended: schedule gold no more often than its silver sources refresh.** Gold's schedule interval should be at
+least as long as the refresh interval of the silver (or other upstream) tables it gates on — silver hourly → gold
+hourly or less often, never every 15 minutes — and offset to start after silver usually finishes (e.g. silver at :00
+taking ~10 min → gold at :15). Most ticks then find fresh data, so a failed check means something is actually late.
+With several source groups, use the cadence of the group passed in `--src_group` (see *Every source group must pass by
+default*), and keep `refresh_window_btn_tables_in_mins` about equal to the gold interval.
+
+Also:
 
 - **Alert on persistence, not on each failure:** a SQL alert or dashboard on `system.lakeflow.job_run_timeline` that
   fires after N consecutive failed checks, or when the job has not succeeded for more than X hours.
 - **Use the error text:** it names the stale group, the stale tables and the cutoff (UTC), so an alert can say what
   is late.
-- **Match the schedule to the data:** a schedule much more frequent than the upstream refresh mostly produces failed
-  ticks.
 - **Already-processed ticks:** with `--skip_if_already_processed` they are *Canceled*, not *Failed*; set
   `notification_settings.no_alert_for_canceled_runs` so they stay silent. Stale ticks still fail.
 
@@ -82,12 +91,21 @@ for hours because an upstream pipeline is broken. Instead:
 Without `--src_group`, the check reads all the entity's tracker rows and requires **every group** to be fresh within
 its own window — for `J_gold`, `daily` (`silver_sales` within 20 min) **and** `weekly` (`bronze_products`,
 `bronze_regions` within 7 days). One late group therefore blocks the others: if the weekly file arrives a day late,
-every daily tick fails until it lands, even though the daily data is fine. Choose per job:
+every daily tick fails until it lands, even though the daily data is fine.
 
-- **Default (all groups):** gold runs only when every input is fresh — strictest, right when gold is wrong without
-  all of them.
-- **`--src_group=daily`:** gold runs whenever the daily group is fresh, whatever the weekly group's state — right
-  when the weekly data is slow-changing reference data and last week's copy is acceptable.
+**Recommended workaround: gate the scheduled check on the group that matches its schedule, `--src_group=daily`.**
+Gold then runs whenever the daily group is fresh, whatever the weekly group's state — the usual case, since weekly
+sources are typically slow-changing reference data where last week's copy is acceptable:
+
+```json
+"parameters": ["--tracker_table=main.ops.entity_tracker", "--entity_name={{job.name}}", "--src_group=daily",
+               "--skip_if_already_processed=true", "--job_run_id={{job.run_id}}"]
+```
+
+Other options, per job:
+
+- **Default (all groups):** gold runs only when every input is fresh — strictest, use it only when gold is wrong
+  without all of them.
 - **A weekly window a bit longer than the cadence** (e.g. 8 days = 11520 min), so one late delivery does not block
   immediately.
 - **`src_tables_to_skip`** for a source that should never gate the job.
@@ -132,7 +150,7 @@ when a launch was missed (e.g. a handoff whose upstream job failed) the tick run
 | File | Role |
 |---|---|
 | `src/tracker_setup.py` | Creates the tracker table (safe to re-run). |
-| `src/upstream_source_tracking.py` | For a Job / Pipeline name: finds its pipelines (job → `pipeline_task`s), the tables they currently manage (lineage targets confirmed by UC `pipeline_id`), the **final** tables (not read by another owned table) and the **external sources** (inputs of each owned table's latest write, minus owned tables, UC views expanded via `view_dependencies`). Records each source's producer and MERGEs one tracker row. |
+| `src/upstream_source_tracking.py` | **Beta** — generates tracker rows; you can also write them by hand. For a Job / Pipeline name: finds its pipelines (job → `pipeline_task`s), the tables they currently manage (lineage targets confirmed by UC `pipeline_id`), the **final** tables (not read by another owned table) and the **external sources** (inputs of each owned table's latest write, minus owned tables, UC views expanded via `view_dependencies`). Records each source's producer and MERGEs one tracker row. |
 | `src/job_pipeline_launch.py` | **Last task of an upstream job**, `--src_tables` = the tables its pipelines just refreshed. Finds tracker rows (entity + `src_group`) that use any of them (and don't skip them); those tables count as refreshed now, other sources go through the freshness rule. Latest run started after the row's sources were last refreshed (for the passed tables: their pipeline's actual completion, from the event log) → skip; run in progress that started before it (e.g. launched for another `src_group`) → **queue** another; otherwise `run_now` / `start_update`. Entities are launched upstream-first, at most once per task. An entity whose sources are about to be refreshed again — a target of another entity launched in the same task, or its producer pipeline is running (continuous pipelines excluded) — is left `WAITING_ON_UPSTREAM` if that upstream is a job whose own launch task covers the table; otherwise the task **waits** for the upstream run / update, re-checks the sources and then launches it (`UPSTREAM_FAILED` if that run fails). Waits run in parallel under one `--queue_timeout_mins` deadline. |
 | `src/source_freshness_check.py` | Optional gating task: fails unless every source (minus skip list) of one entity is fresh — every `src_group` within its own window, or only `--src_group`. First task of a scheduled downstream job. |
 | `src/async_job_execution/freshness.py` | Freshness rule shared by the launcher and the check. |
@@ -141,18 +159,74 @@ when a launch was missed (e.g. a handoff whose upstream job failed) the tick run
 ## Tracker table (`<catalog>.<schema>.entity_tracker`)
 
 One row per downstream Job / Pipeline and source group, keyed by `entity_name` + `entity_type` + `src_group`.
+Created by `tracker_setup.py`; rows are written by hand ([Manual tracker edits](#manual-tracker-edits)) or generated
+by the beta `upstream_source_tracking.py`.
 
-| Column | Type | Meaning |
+| Column | Type | Required | Meaning |
+|---|---|---|---|
+| `entity_name` | STRING | yes | Job or Pipeline name (exact; the tracker key) |
+| `entity_type` | STRING | yes | `JOB` or `PIPELINE` |
+| `src_group` | STRING | yes (`default`) | Source group (e.g. `daily` / `weekly`): own `src_tables` and window; each group is its own launch rule |
+| `target_tables` | ARRAY<STRING> | for Flow 1 | Final tables written by the entity; the launcher uses them to order entities and wait for upstreams |
+| `src_tables` | ARRAY<STRING> | yes | Upstream source tables (fully qualified; views expanded to their tables) |
+| `src_tables_to_skip` | ARRAY<STRING> | no (empty) | Sources excluded from the check; kept when `upstream_source_tracking.py` re-runs |
+| `src_table_producers` | MAP<STRING, STRUCT<producer_type, producer_id>> | no (empty) | Per source: `JOB <job_id>` or `NONE`; `PIPELINE` sources are resolved from Unity Catalog — see [When `src_table_producers` is needed](#when-src_table_producers-is-needed) |
+| `refresh_window_btn_tables_in_mins` | INT | yes | Freshness window in minutes (`upstream_source_tracking.py` inserts 5); kept on re-runs |
+| `created_on`, `updated_on`, `created_by`, `updated_by` | DATE / STRING | no | Audit |
+
+<details>
+<summary>Table definition (<code>tracker_setup.py</code>)</summary>
+
+```sql
+CREATE TABLE IF NOT EXISTS <catalog>.<schema>.entity_tracker (
+    entity_name STRING
+        COMMENT 'Name of the Databricks Job or Lakeflow Declarative Pipeline that writes the target tables',
+    entity_type STRING
+        COMMENT 'Type of the producing entity: JOB or PIPELINE',
+    src_group STRING
+        COMMENT 'Source group of the entity (e.g. daily / weekly): each group has its own src_tables and window and launches the entity on its own; default = default',
+    target_tables ARRAY<STRING>
+        COMMENT 'Fully qualified names (catalog.schema.table) of the final tables written by this Job/Pipeline',
+    src_tables ARRAY<STRING>
+        COMMENT 'Upstream base tables / materialized views feeding the target tables (views expanded)',
+    src_tables_to_skip ARRAY<STRING>
+        COMMENT 'Subset of src_tables to ignore in the freshness check (maintained manually)',
+    src_table_producers MAP<STRING, STRUCT<producer_type: STRING, producer_id: STRING>>
+        COMMENT 'Per src table: PIPELINE (pipeline_id) / JOB (job_id) / NONE. A successful producer run counts as a refresh even if no rows changed',
+    refresh_window_btn_tables_in_mins INT
+        COMMENT 'Max minutes allowed between source table refreshes for the Job/Pipeline to be launched',
+    created_on DATE COMMENT 'Date the row was first inserted',
+    updated_on DATE COMMENT 'Date the row was last updated',
+    created_by STRING COMMENT 'User who inserted the row',
+    updated_by STRING COMMENT 'User who last updated the row'
+)
+COMMENT 'Entity tracker: one row per Job/Pipeline and source group with its target tables and upstream source tables'
+```
+
+</details>
+
+### When `src_table_producers` is needed
+
+For each source, the check resolves the producer in this order:
+
+1. The table has a UC `pipeline_id` (SDP streaming table / materialized view) → that **pipeline**, read live from
+   Unity Catalog; a map entry for it is ignored.
+2. Else the map has `JOB <job_id>` → that **job**; its last successful run counts as a refresh.
+3. Else **`NONE`** → only the table's last data write (`DESCRIBE HISTORY`) counts.
+
+So the map is optional — needed only when a source can be refreshed **without a new Delta commit**:
+
+| Source | Needs a `JOB` entry? | Why |
 |---|---|---|
-| `entity_name` | STRING | Job or Pipeline name |
-| `entity_type` | STRING | `JOB` or `PIPELINE` |
-| `src_group` | STRING | Source group (default `default`, e.g. `daily` / `weekly`): own `src_tables` and window; each group launches the entity on its own |
-| `target_tables` | ARRAY<STRING> | Final tables written by the entity |
-| `src_tables` | ARRAY<STRING> | Upstream source tables (views expanded) |
-| `src_tables_to_skip` | ARRAY<STRING> | Sources excluded from the check (manual) |
-| `src_table_producers` | MAP<STRING, STRUCT<producer_type, producer_id>> | Per source: `PIPELINE` / `JOB` / `NONE` |
-| `refresh_window_btn_tables_in_mins` | INT | Freshness window (default 5) |
-| `created_on`, `updated_on`, `created_by`, `updated_by` | | Audit |
+| SDP table (has a UC `pipeline_id`) | No | Resolved to its pipeline automatically |
+| Written by a non-SDP job whose every successful run commits to the table (insert, overwrite, append, or **any MERGE — even one that changes no rows**) | No | The commit keeps it fresh: a MERGE that matches nothing still commits a `MERGE` version (verified on DBR 17.3) |
+| Written by a non-SDP job whose run can succeed **without committing** (it skips the write when there is no new input, or writes only when there is something to write) | **Yes** | With `NONE` such a run leaves it stale; with `JOB` the successful run counts |
+| Non-Delta source (foreign / federated table, Parquet, JDBC) | **Yes** | No Delta history, so without a producer it is always stale |
+| Refreshed only by `CLONE` / `RESTORE` | **Yes** | Not counted as data writes |
+
+The gated job's own type does not matter (a non-SDP job reading SDP tables needs no entries), and the launcher
+(Flow 1) counts the tables passed in `--src_tables` as refreshed now whatever their producer. To add an entry, see
+*set a producer* in [Manual tracker edits](#manual-tracker-edits).
 
 Example: a gold job with daily and weekly sources, registered as two source groups (from the test cascade in
 [Example logs](#example-logs)):
@@ -202,7 +276,7 @@ this repo (job **Git source**, or a Databricks Git folder); `src/` is the script
 | Script | Parameters |
 |---|---|
 | `tracker_setup.py` | `--tracker_table` only |
-| `upstream_source_tracking.py` | `--entity_type JOB\|PIPELINE --entity_name <name> [--src_group default] [--src_tables <subset>] [--dry_run true] [--max_recursion_depth 5] [--lineage_lookback_days 90]` |
+| `upstream_source_tracking.py` (beta) | `--entity_type JOB\|PIPELINE --entity_name <name> [--src_group default] [--src_tables <subset>] [--dry_run true] [--max_recursion_depth 5] [--lineage_lookback_days 90]` |
 | `job_pipeline_launch.py` | `--src_tables <t1>,<t2>,... [--entity_type ALL\|JOB\|PIPELINE] [--dry_run true\|false] [--queue_timeout_mins 60] [--fail_on_queue_timeout true\|false]` |
 | `source_freshness_check.py` | `--entity_type JOB\|PIPELINE --entity_name <name> [--src_group <group>] [--skip_if_already_processed true\|false --job_run_id <run id>]` (as a gating task: `--entity_name={{job.name}} --job_run_id={{job.run_id}}`) |
 
@@ -275,7 +349,9 @@ is what a downstream run's start is compared with to decide whether it already i
 ## Typical setup
 
 1. Run `tracker_setup.py` once.
-2. Run `upstream_source_tracking.py` for each downstream Job / Pipeline (re-run after its definition changes).
+2. Register each downstream Job / Pipeline in the tracker: write its row(s) by hand (see
+   [Manual tracker edits](#manual-tracker-edits)), or generate them with the **beta**
+   `upstream_source_tracking.py` — run it with `--dry_run true` first and review the row.
 3. Adjust `refresh_window_btn_tables_in_mins` / `src_tables_to_skip` in the tracker as needed.
 4. Add `job_pipeline_launch.py` as the last task of each upstream job, passing the tables its pipelines refresh
    (Flow 1).
@@ -298,25 +374,18 @@ the source tables and their pipelines / jobs, and permission to run the Jobs / P
 
 ## Known gaps
 
-Two kinds: **freshness** gaps decide whether a source is tracked and counts as fresh (they affect both flows), and
-**launch** gaps affect how `job_pipeline_launch.py` launches (Flow 1). Most freshness gaps are worked around by
-editing the tracker — see [Manual tracker edits](#manual-tracker-edits).
+The freshness check and the launcher work from the tracker table. Limitations of generating tracker rows
+automatically are listed separately under [upstream_source_tracking.py (beta)](#upstream_source_trackingpy-beta);
+deliberate design choices are under [Behavior notes](#behavior-notes).
 
 ### Freshness gaps
 
 | Gap | Impact | Workaround |
 |---|---|---|
-| Only **pipeline tasks** of a job are discovered (by design — see *Best suited for SDP jobs*) | Tables written by notebook / SQL / other tasks are missing from `target_tables` / `src_tables` | Add them to the tracker manually ([add a source](#manual-tracker-edits)), with a `JOB` producer so the job's successful run counts |
-| Discovery depends on **lineage**, which lands with a delay, and reads only the last `--lineage_lookback_days` (90) | A new pipeline / table is missing until its first run's lineage lands; one not written within the lookback is not found | Re-run `upstream_source_tracking.py` once lineage has landed; raise `--lineage_lookback_days`; or add the row manually |
-| Pipeline **sinks** have no UC `pipeline_id` | Tables written through sinks are not tracked as targets | Add them to `target_tables` manually |
-| A **JOB producer** is found from lineage (best effort with several writers; lineage lags) | A source may get `NONE` (last data write only) or the wrong job | Set its producer manually ([set a producer](#manual-tracker-edits)) |
-| Entity **names** are the tracker key | Renaming a Job / Pipeline orphans its rows | `UPDATE` the rows' `entity_name` ([rename](#manual-tracker-edits)), or re-run `upstream_source_tracking.py` with the new name and delete the old rows |
 | `CLONE` / `RESTORE` are not counted as data writes (not typical ETL operations) | A source refreshed only by a clone / restore counts as fresh only if its producer ran within the window | Give it a `JOB` producer (the job doing the clone / restore), or add it to `src_tables_to_skip` |
 | If `event_log()` cannot be read, only the system events table is used (about 1 min p99 lag) | A pipeline that has just finished can look stale for about a minute | Give the runner access to the pipelines' event logs, or allow a couple of minutes more in the window |
-| One **window per source group** | Sources on different cadences cannot share one row | One row per group (`--src_group daily --src_tables …`, `--src_group weekly --src_tables …`), each with its own `refresh_window_btn_tables_in_mins` |
-| Scheduled check: **every source group** must be fresh unless `--src_group` is given | One late group (e.g. weekly) blocks the others | `--src_group`, a weekly window a bit longer than the cadence, or `src_tables_to_skip` — see *Every source group must pass by default* |
-| Scheduled check does **not wait for a running upstream** | A tick can pass on the previous refresh while an upstream is mid-update | The next tick picks up the new data; `--skip_if_already_processed` keeps it to one run per refresh |
-| `--skip_if_already_processed` looks at the **last 25 runs** for the previous successful one | If none of them succeeded, the tick runs (errs on the side of running) | None needed |
+| The scheduled check does **not wait for a running upstream** | A tick can pass on the previous refresh while an upstream is mid-update | The next tick picks up the new data; `--skip_if_already_processed` keeps it to one run per refresh |
+| Entity **names** are the tracker key | Renaming a Job / Pipeline orphans its rows | `UPDATE` the rows' `entity_name` ([rename](#manual-tracker-edits)) |
 
 ### Launch gaps
 
@@ -326,17 +395,45 @@ editing the tracker — see [Manual tracker edits](#manual-tracker-edits).
 | A job's launch task is recognised by `python_file` ending in `job_pipeline_launch.py` and **literal** `--src_tables` / `--entity_type` / `--dry_run` values | With `{{job.parameters…}}` references the job is waited on instead of handed off to | Use literal values in launch-task parameters |
 | A **handoff** (`WAITING_ON_UPSTREAM`) relies on the upstream job's launch task | If that job fails or is cancelled before its launch task runs, neither task launches the entity | Run the scheduled check (Flow 2) with `--skip_if_already_processed` as a safety net, or re-run the upstream job |
 | `UPSTREAM_FAILED` (awaited upstream run failed) and `SKIPPED` (stale after the wait) do not fail the launch task | The entity is not launched and the task is green | The upstream's failure shows on its own run; alert on it, or rely on the Flow 2 safety net |
-| **Waiting** keeps the launch task running; all waits share one `--queue_timeout_mins` deadline | The upstream job runs longer; a wait that runs out is `QUEUE_TIMEOUT` and fails the task | Tune `--queue_timeout_mins`; `--fail_on_queue_timeout false` to report without failing |
-| Within one task an entity is launched **at most once**, even if several groups are fresh | A group that waited for an upstream queues another run only if the earlier one does not include the new data | By design; jobs queue with `run_now` queueing, pipelines start after the running update |
 | A **cycle** between tracked entities (each reads the other's targets) | One side launches without waiting | Avoid cycles, or add the back-edge table to that row's `src_tables_to_skip` |
 | A pipeline tracked **standalone and inside a tracked job** | It can be launched twice | Track it only via the job: delete its standalone row |
-| A handoff to a **running producer** finds its job by listing all active job runs in the workspace | Extra API calls in busy workspaces (only when a producer is running) | None needed |
+
+### Behavior notes
+
+By design, not gaps:
+
+- **One window per source group.** Sources on different cadences get one row per group (e.g. `daily`, `weekly`),
+  each with its own `refresh_window_btn_tables_in_mins`.
+- **The scheduled check requires every source group** to be fresh unless `--src_group` is given; the recommended
+  workaround is `--src_group=daily` (the group matching the schedule) — see *Every source group must pass by default*.
+- **`--skip_if_already_processed`** looks at the entity's last 25 runs for the previous successful one; if none of
+  them succeeded, the tick runs (errs on the side of running).
+- **Within one launch task an entity is launched at most once**, even if several groups are fresh; a group that
+  waited for an upstream queues another run only if the earlier one does not include the new data.
+- **Waiting keeps the launch task running.** All its waits share one `--queue_timeout_mins` deadline; a wait that
+  runs out is `QUEUE_TIMEOUT` and fails the task unless `--fail_on_queue_timeout false`.
+- **Handing off to a running producer** finds its job by listing the workspace's active job runs (only when a
+  producer pipeline is running).
+
+### upstream_source_tracking.py (beta)
+
+`upstream_source_tracking.py` generates an entity's tracker row from lineage. It is a convenience: the row can always
+be written or corrected by hand ([Manual tracker edits](#manual-tracker-edits)), which is what the freshness check
+and the launcher read. Run it with `--dry_run true` first and review the row. Known limitations:
+
+| Limitation | Impact | Workaround |
+|---|---|---|
+| Follows only the **pipeline tasks** of a job | A job without pipeline tasks (non-SDP) fails with *no pipeline tasks*; tables written by notebook / SQL / other tasks are missing | Write the row by hand ([register an entity](#manual-tracker-edits)), or add the missing tables with a `JOB` producer ([add a source](#manual-tracker-edits)) |
+| Depends on **lineage**, which lands with a delay, and reads only the last `--lineage_lookback_days` (90) | A new pipeline / table is missing until its first run's lineage lands; one not written within the lookback is not found | Re-run once lineage has landed; raise `--lineage_lookback_days`; or add the row by hand |
+| Pipeline **sinks** have no UC `pipeline_id` | Tables written through sinks are not tracked as targets | Add them to `target_tables` by hand |
+| **JOB producers** are found from lineage (best effort with several writers) | A source may get `NONE` (last data write only) or the wrong job | Set its producer by hand ([set a producer](#manual-tracker-edits)) |
+| Re-running **replaces** `target_tables`, `src_tables` and `src_table_producers` | Manual edits to those columns are lost (`src_tables_to_skip` and the window are kept) | Re-apply them, or stop re-running it for that entity |
 
 ### Manual tracker edits
 
-Re-running `upstream_source_tracking.py` for an entity **replaces** `target_tables`, `src_tables` and
-`src_table_producers` with what it discovers; `src_tables_to_skip` and `refresh_window_btn_tables_in_mins` are kept.
-Re-apply manual edits to the replaced columns after a re-run (or stop re-running discovery for that entity).
+The freshness check and the launcher read these rows as they are, however they were written. If the beta
+`upstream_source_tracking.py` is re-run for an entity, it **replaces** `target_tables`, `src_tables` and
+`src_table_producers` (`src_tables_to_skip` and the window are kept), so re-apply manual edits to those columns.
 
 ```sql
 -- add a source not discovered (e.g. written by a notebook task of job 123), with a JOB producer
